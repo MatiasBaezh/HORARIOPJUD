@@ -1,0 +1,6 @@
+{
+  "name": "Remix: Asistify - Control de Asistencia version para publicar",
+  "description": "Analizador de registros de asistencia. Calcula atrasos y salidas anticipadas con semáforos de alerta personalizables.",
+  "requestFramePermissions": [],
+  "majorCapabilities": []
+}
