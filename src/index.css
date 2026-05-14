@@ -4,6 +4,11 @@
 @theme {
   --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
   
+  /* Use CSS variables with fallback */
+  --color-blue-600: var(--primary-600, #2563eb);
+  --color-blue-700: var(--primary-700, #1d4ed8);
+  --color-blue-50: var(--primary-50, #eff6ff);
+
   /* Corporate Palette - Handing Inspired */
   --color-brand-primary: #37393d; /* Lectura */
   --color-brand-secondary: #4e63ce; /* Novedad */

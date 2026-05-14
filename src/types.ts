@@ -15,6 +15,39 @@ export interface Exception {
   deferredExitTime: string; // HH:mm
 }
 
+export interface DayConfig {
+  isTelework: boolean;
+  isHybrid: boolean;
+  startTime: string; // Office entry
+  endTime: string;   // Office exit
+}
+
+export interface HybridSchedule {
+  id: string;
+  employeeName: string;
+  startDate: string; // ISO format YYYY-MM-DD
+  endDate: string; // ISO format YYYY-MM-DD
+  daysConfig: { [key: number]: DayConfig }; // 0-6 (Sunday-Saturday)
+}
+
+export interface GeneralException {
+  id: string;
+  description: string;
+  date: string; // ISO format YYYY-MM-DD
+  type: IncidentType;
+}
+
+export type IncidentType = 'ATRASO' | 'SALIDA ANTICIPADA' | 'AUSENCIA';
+
+export interface ParticularIncident {
+  id: string;
+  employeeName: string;
+  date: string; // ISO format YYYY-MM-DD
+  type: IncidentType;
+  description: string;
+  status: 'ACTIVO' | 'INACTIVO';
+}
+
 export interface AnalysisResult {
   employeeName: string;
   totalLateDays: number;
@@ -29,7 +62,23 @@ export interface AnalysisResult {
     lateMinutes: number;
     earlyExitMinutes: number;
     hoursWorked: number | null;
-    lateStatus: 'none' | 'yellow' | 'orange' | 'red';
-    exitStatus: 'none' | 'yellow' | 'orange' | 'red';
+    lateStatus: 'none' | 'neutral' | 'yellow' | 'red' | 'hybrid' | 'justified';
+    exitStatus: 'none' | 'neutral' | 'yellow' | 'red' | 'hybrid' | 'justified';
+    isMissing?: boolean;
+    isJustifiedAbsence?: boolean;
+    absenceJustification?: ParticularIncident;
+    lateJustification?: ParticularIncident;
+    exitJustification?: ParticularIncident;
+    isHybrid?: boolean;
   }[];
+}
+
+export interface UploadHistoryItem {
+  id: string;
+  fileName: string;
+  uploadDate: string; // ISO
+  dateRange: { start: string; end: string };
+  recordCount: number;
+  newDates: string[];
+  overwrittenDates: string[];
 }
