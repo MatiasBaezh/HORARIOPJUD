@@ -67,7 +67,7 @@ import { cn } from './lib/utils';
 import { AttendanceRecord, Exception, AnalysisResult, HybridSchedule, GeneralException, ParticularIncident, IncidentType, UploadHistoryItem } from './types';
 import { auth, db, signInWithGoogle } from './lib/firebase';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where, getDocFromServer } from 'firebase/firestore';
 
 const DEFAULT_ENTRY = '08:00';
 const DEFAULT_EXIT = '16:00';
@@ -368,6 +368,7 @@ export default function App() {
       // Auto-admin for the owner
       if (u?.email?.toLowerCase() === 'matiasbaezh@gmail.com') {
         setIsAdmin(true);
+        localStorage.setItem('timetrack_is_admin', 'true');
       }
     });
     return unsubscribe;
@@ -501,20 +502,19 @@ export default function App() {
         // Handle data (AttendanceRecord) separately if it changed
         if (newData?.data || (action === 'save' && !newData)) {
           const recordsToSave = newData?.data || data;
-          // In a real production app, we would only sync changes.
-          // For this app, we'll use a simplified batch approach for now.
-          // Note: This is still limited by batch size (500).
-          // Better: If they are many, we might need a better sync strategy.
-          // For now, let's just save the current records if they fit in the document or uses a few docs.
-          
-          // Actually, saving thousands of records one by one is slow.
-          // Let's store records in chunks or just as one blob in a dedicated doc if under 1MB.
-          // 1MB is usually enough for ~5000 attendance records.
+          // Store records as one blob in a dedicated doc if under 1MB.
           await setDoc(doc(db, 'app_data', 'records_blob'), { data: recordsToSave });
         }
       } else {
-        // Load from Firestore
-        const configSnap = await getDoc(doc(db, 'settings', 'config'));
+        // Load from Firestore - using getDocFromServer to attempt recovery from "offline" states
+        let configSnap;
+        try {
+          configSnap = await getDocFromServer(doc(db, 'settings', 'config'));
+        } catch (err) {
+          console.warn("getDocFromServer failed, falling back to cache", err);
+          configSnap = await getDoc(doc(db, 'settings', 'config'));
+        }
+
         if (configSnap.exists()) {
           const cloudData = configSnap.data();
           if (cloudData.exceptions) setExceptions(cloudData.exceptions);
@@ -532,7 +532,13 @@ export default function App() {
           }
         }
         
-        const recordsSnap = await getDoc(doc(db, 'app_data', 'records_blob'));
+        let recordsSnap;
+        try {
+          recordsSnap = await getDocFromServer(doc(db, 'app_data', 'records_blob'));
+        } catch (err) {
+          recordsSnap = await getDoc(doc(db, 'app_data', 'records_blob'));
+        }
+
         if (recordsSnap.exists()) {
           const { data: cloudRecords } = recordsSnap.data();
           if (cloudRecords) {
@@ -546,6 +552,7 @@ export default function App() {
       }
     } catch (e) {
       console.error('Firestore Sync error:', e);
+      // We don't alert here to avoid spamming the user during flaky connectivity
     } finally {
       setIsCloudSyncing(false);
     }
