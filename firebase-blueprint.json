@@ -86,6 +86,18 @@
         "activeDays": { "type": "array" },
         "processedDates": { "type": "array" }
       }
+    },
+    "UserPermission": {
+      "title": "User Permission",
+      "description": "Access control for a specific user email",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "email": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "editor", "viewer"] },
+        "scope": { "type": "string" }
+      },
+      "required": ["email", "role", "scope"]
     }
   },
   "firestore": {
@@ -95,6 +107,7 @@
     "general_exceptions": { "schema": "GeneralException", "description": "Public holidays or massive justifications" },
     "particular_incidents": { "schema": "ParticularIncident", "description": "Individual justifications" },
     "upload_history": { "schema": "UploadHistoryItem", "description": "Activity log" },
-    "settings/config": { "schema": "AppConfig", "description": "Global application state" }
+    "settings/config": { "schema": "AppConfig", "description": "Global application state" },
+    "users": { "schema": "UserPermission", "description": "User access and roles" }
   }
 }

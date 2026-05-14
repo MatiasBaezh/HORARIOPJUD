@@ -69,7 +69,7 @@ import { cn } from './lib/utils';
 import { AttendanceRecord, Exception, AnalysisResult, HybridSchedule, GeneralException, ParticularIncident, IncidentType, UploadHistoryItem, UserPermission, UserRole, AuditInfo } from './types';
 import { auth, db, signInWithGoogle } from './lib/firebase';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
-import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where, getDocFromServer } from 'firebase/firestore';
+import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where, getDocFromServer, deleteDoc } from 'firebase/firestore';
 
 const DEFAULT_ENTRY = '08:00';
 const DEFAULT_EXIT = '16:00';
@@ -492,14 +492,28 @@ export default function App() {
     return userPermissions.find(p => p.email.toLowerCase() === user.email?.toLowerCase());
   }, [user, userPermissions]);
 
-  const userRole: UserRole = useMemo(() => {
-    if (user?.email?.toLowerCase() === 'matiasbaezh@gmail.com') return 'admin';
-    return currentUserPermission?.role || 'viewer';
+  const isAdmin = useMemo(() => {
+    if (!user) return false;
+    if (user.email?.toLowerCase() === 'matiasbaezh@gmail.com') return true;
+    return currentUserPermission?.role === 'admin';
   }, [user, currentUserPermission]);
 
-  const isAdmin = userRole === 'admin';
-  const isEditor = userRole === 'admin' || userRole === 'editor';
-  const viewScope = currentUserPermission?.scope || 'total';
+  const userRole: UserRole = useMemo(() => {
+    if (isAdmin) return 'admin';
+    return currentUserPermission?.role || 'viewer';
+  }, [isAdmin, currentUserPermission]);
+
+  const isEditor = isAdmin || userRole === 'editor';
+
+  const viewScope = useMemo(() => {
+    // Admins always see everything
+    if (isAdmin) return 'total';
+    // If explicit permission exists, use its scope
+    if (currentUserPermission) return currentUserPermission.scope;
+    // Default for registered users: only their own name
+    // This prevents David from seeing everyone if he's not in the list or has no scope
+    return user?.displayName || '🔒';
+  }, [isAdmin, currentUserPermission, user]);
 
   const checkPermission = (action: () => void, requiredRole: UserRole = 'editor') => {
     if (requiredRole === 'admin' && isAdmin) {
@@ -532,12 +546,23 @@ export default function App() {
           particularIncidents,
           processedDates,
           uploadHistory,
-          userPermissions,
           config: { schedule, satSchedule, appOptions, tolerances, theme }
         };
         
         // Save config and metadata to a single document
         await setDoc(doc(db, 'settings', 'config'), payload);
+
+        // Manage users separately if they were changed
+        if (newData?.userPermissions) {
+          const batch = writeBatch(db);
+          // This is a simple implementation: clear and rewrite or just update
+          // For a true multi-user system, we should update individually, but to keep the current UI flow:
+          for (const perm of newData.userPermissions) {
+            const userRef = doc(db, 'users', perm.email.toLowerCase().trim());
+            batch.set(userRef, perm);
+          }
+          await batch.commit();
+        }
         
         // Handle data (AttendanceRecord) separately if it changed
         if (newData?.data || (action === 'save' && !newData)) {
@@ -546,6 +571,14 @@ export default function App() {
           await setDoc(doc(db, 'app_data', 'records_blob'), { data: recordsToSave });
         }
       } else {
+        // Load users from collection
+        const usersSnap = await getDocs(collection(db, 'users'));
+        const cloudPerms: UserPermission[] = [];
+        usersSnap.forEach(doc => {
+          cloudPerms.push(doc.data() as UserPermission);
+        });
+        setUserPermissions(cloudPerms);
+
         // Load from Firestore - using getDocFromServer to attempt recovery from "offline" states
         let configSnap;
         try {
@@ -558,9 +591,23 @@ export default function App() {
         if (configSnap.exists()) {
           const cloudData = configSnap.data();
           
-          // Determine user permissions from cloud config
-          const cloudPerms = cloudData.userPermissions || [];
-          setUserPermissions(cloudPerms);
+          // Migration: if zero users in collection but users exist in config, migrate them
+          if (cloudPerms.length === 0 && cloudData.userPermissions && Array.isArray(cloudData.userPermissions)) {
+            const batch = writeBatch(db);
+            const migratedPerms: UserPermission[] = [];
+            cloudData.userPermissions.forEach((p: UserPermission) => {
+              if (p.email) {
+                const userRef = doc(db, 'users', p.email.toLowerCase().trim());
+                batch.set(userRef, p);
+                migratedPerms.push(p);
+              }
+            });
+            if (migratedPerms.length > 0) {
+              await batch.commit();
+              setUserPermissions(migratedPerms);
+              console.log('Migración de usuarios completada');
+            }
+          }
           
           if (cloudData.exceptions) setExceptions(cloudData.exceptions);
           if (cloudData.hybridSchedules) setHybridSchedules(cloudData.hybridSchedules);
@@ -3748,7 +3795,8 @@ export default function App() {
                       <button 
                         onClick={() => {
                           const id = generateId();
-                          setUserPermissions([...userPermissions, { id, email: '', role: 'viewer', scope: 'total' }]);
+                          const newUser = { id, email: '', role: 'viewer' as UserRole, scope: 'total' };
+                          setUserPermissions([...userPermissions, newUser]);
                         }}
                         className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-white rounded-xl text-[10px] font-black hover:bg-slate-700 transition-all shadow-sm"
                       >
@@ -3809,18 +3857,38 @@ export default function App() {
                                   disabled={perm.role === 'admin'}
                                 >
                                   <option value="total">Toda la Aplicación</option>
-                                  {workerNames.map(name => (
+                                  {allWorkerNames.map(name => (
                                     <option key={name} value={name}>{name}</option>
                                   ))}
                                 </select>
                               </td>
                               <td className="py-3 px-2 text-right">
-                                <button 
-                                  onClick={() => setUserPermissions(userPermissions.filter((_, i) => i !== idx))}
-                                  className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
+                                <div className="flex justify-end gap-2">
+                                  <button 
+                                    onClick={async () => {
+                                      if (!perm.email) return alert("Ingrese un correo");
+                                      await setDoc(doc(db, 'users', perm.email.toLowerCase().trim()), perm);
+                                      alert("Permisos guardados para " + perm.email);
+                                    }}
+                                    className="p-2 text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                                    title="Guardar cambios para este usuario"
+                                  >
+                                    <Check className="w-4 h-4" />
+                                  </button>
+                                  <button 
+                                    onClick={async () => {
+                                      if (perm.email) {
+                                        // Delete from firebase
+                                        await deleteDoc(doc(db, 'users', perm.email.toLowerCase().trim()));
+                                      }
+                                      setUserPermissions(userPermissions.filter((_, i) => i !== idx));
+                                    }}
+                                    className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                    title="Eliminar usuario"
+                                  >
+                                    <Trash2 className="w-4 h-4" />
+                                  </button>
+                                </div>
                               </td>
                             </tr>
                           ))}
