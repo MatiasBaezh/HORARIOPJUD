@@ -13,6 +13,7 @@ export interface Exception {
   endDate: string; // ISO format YYYY-MM-DD
   deferredEntryTime: string; // HH:mm
   deferredExitTime: string; // HH:mm
+  lastModified?: AuditInfo;
 }
 
 export interface DayConfig {
@@ -28,6 +29,7 @@ export interface HybridSchedule {
   startDate: string; // ISO format YYYY-MM-DD
   endDate: string; // ISO format YYYY-MM-DD
   daysConfig: { [key: number]: DayConfig }; // 0-6 (Sunday-Saturday)
+  lastModified?: AuditInfo;
 }
 
 export interface GeneralException {
@@ -35,6 +37,7 @@ export interface GeneralException {
   description: string;
   date: string; // ISO format YYYY-MM-DD
   type: IncidentType;
+  lastModified?: AuditInfo;
 }
 
 export type IncidentType = 'ATRASO' | 'SALIDA ANTICIPADA' | 'AUSENCIA';
@@ -46,6 +49,7 @@ export interface ParticularIncident {
   type: IncidentType;
   description: string;
   status: 'ACTIVO' | 'INACTIVO';
+  lastModified?: AuditInfo;
 }
 
 export interface AnalysisResult {
@@ -71,6 +75,21 @@ export interface AnalysisResult {
     exitJustification?: ParticularIncident;
     isHybrid?: boolean;
   }[];
+}
+
+export interface AuditInfo {
+  at: number; // timestamp
+  byName: string;
+  byEmail: string;
+}
+
+export type UserRole = 'admin' | 'editor' | 'viewer';
+
+export interface UserPermission {
+  id: string;
+  email: string;
+  role: UserRole;
+  scope: 'total' | string; // 'total' or specific worker name
 }
 
 export interface UploadHistoryItem {

@@ -17,6 +17,8 @@ import {
   Users,
   Settings,
   Edit2,
+  Edit3,
+  Eye,
   Check,
   X,
   ArrowRight,
@@ -64,7 +66,7 @@ import {
 } from 'date-fns';
 import { es } from 'date-fns/locale';
 import { cn } from './lib/utils';
-import { AttendanceRecord, Exception, AnalysisResult, HybridSchedule, GeneralException, ParticularIncident, IncidentType, UploadHistoryItem } from './types';
+import { AttendanceRecord, Exception, AnalysisResult, HybridSchedule, GeneralException, ParticularIncident, IncidentType, UploadHistoryItem, UserPermission, UserRole, AuditInfo } from './types';
 import { auth, db, signInWithGoogle } from './lib/firebase';
 import { onAuthStateChanged, User, signOut } from 'firebase/auth';
 import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where, getDocFromServer } from 'firebase/firestore';
@@ -368,37 +370,14 @@ export default function App() {
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (u) => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
       setUser(u);
       setAuthLoading(false);
-      
       if (u) {
-        // Clear search term and filters to ensure they see everything on login
         setSearchTerm('');
         setFilterLateness(false);
         setFilterEarlyExit(false);
         setFilterMissing(false);
-
-        // Auto-admin for the owner
-        if (u.email?.toLowerCase() === 'matiasbaezh@gmail.com') {
-          setIsAdmin(true);
-          localStorage.setItem('timetrack_is_admin', 'true');
-        } else {
-          // Check if user is in admins collection
-          try {
-            const adminSnap = await getDoc(doc(db, 'admins', u.uid));
-            if (adminSnap.exists()) {
-              setIsAdmin(true);
-              localStorage.setItem('timetrack_is_admin', 'true');
-            } else {
-              setIsAdmin(false);
-              localStorage.setItem('timetrack_is_admin', 'false');
-            }
-          } catch (e) {
-            console.error("Error checking admin status:", e);
-            setIsAdmin(false);
-          }
-        }
       }
     });
     return unsubscribe;
@@ -427,8 +406,8 @@ export default function App() {
     }
   };
 
-  const [dateFilterStart, setDateFilterStart] = useState(safeFormat(startOfYear(new Date()), 'yyyy-MM-dd'));
-  const [dateFilterEnd, setDateFilterEnd] = useState(safeFormat(new Date(), 'yyyy-MM-dd'));
+  const [dateFilterStart, setDateFilterStart] = useState('');
+  const [dateFilterEnd, setDateFilterEnd] = useState('');
   const [filterLateness, setFilterLateness] = useState(false);
   const [filterEarlyExit, setFilterEarlyExit] = useState(false);
   const [filterMissing, setFilterMissing] = useState(false);
@@ -445,11 +424,6 @@ export default function App() {
     });
     return { min: minDate, max: maxDate };
   }, [data]);
-  const [isAdmin, setIsAdmin] = useState(() => {
-    return localStorage.getItem('timetrack_is_admin') === 'true';
-  });
-  const [loginForm, setLoginForm] = useState({ user: '', password: '' });
-  const [showLoginModal, setShowLoginModal] = useState(false);
   const [selectedJustification, setSelectedJustification] = useState<ParticularIncident | GeneralException | null>(null);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editingHybridId, setEditingHybridId] = useState<string | null>(null);
@@ -511,6 +485,37 @@ export default function App() {
       primary: 'blue', // blue, teal, purple
     };
   });
+  const [userPermissions, setUserPermissions] = useState<UserPermission[]>([]);
+
+  const currentUserPermission = useMemo(() => {
+    if (!user || !user.email) return null;
+    return userPermissions.find(p => p.email.toLowerCase() === user.email?.toLowerCase());
+  }, [user, userPermissions]);
+
+  const userRole: UserRole = useMemo(() => {
+    if (user?.email?.toLowerCase() === 'matiasbaezh@gmail.com') return 'admin';
+    return currentUserPermission?.role || 'viewer';
+  }, [user, currentUserPermission]);
+
+  const isAdmin = userRole === 'admin';
+  const isEditor = userRole === 'admin' || userRole === 'editor';
+  const viewScope = currentUserPermission?.scope || 'total';
+
+  const checkPermission = (action: () => void, requiredRole: UserRole = 'editor') => {
+    if (requiredRole === 'admin' && isAdmin) {
+      action();
+    } else if (requiredRole === 'editor' && isEditor) {
+      action();
+    } else {
+      alert(`⚠️ No tienes permisos suficientes (${requiredRole}). Contacta al administrador.`);
+    }
+  };
+
+  const createAudit = (): AuditInfo => ({
+    at: Date.now(),
+    byName: user?.displayName || 'Usuario',
+    byEmail: user?.email || 'desconocido@gmail.com'
+  });
 
   // Persistence is handled by the main useEffect below (line 788 approx)
 
@@ -527,6 +532,7 @@ export default function App() {
           particularIncidents,
           processedDates,
           uploadHistory,
+          userPermissions,
           config: { schedule, satSchedule, appOptions, tolerances, theme }
         };
         
@@ -551,6 +557,11 @@ export default function App() {
 
         if (configSnap.exists()) {
           const cloudData = configSnap.data();
+          
+          // Determine user permissions from cloud config
+          const cloudPerms = cloudData.userPermissions || [];
+          setUserPermissions(cloudPerms);
+          
           if (cloudData.exceptions) setExceptions(cloudData.exceptions);
           if (cloudData.hybridSchedules) setHybridSchedules(cloudData.hybridSchedules);
           if (cloudData.generalExceptions) setGeneralExceptions(cloudData.generalExceptions);
@@ -581,7 +592,7 @@ export default function App() {
 
         if (recordsSnap.exists()) {
           const { data: cloudRecords } = recordsSnap.data();
-          if (cloudRecords) {
+          if (cloudRecords && Array.isArray(cloudRecords)) {
             const parsedData = cloudRecords.map((r: any) => ({
               ...r,
               date: r.date ? (
@@ -591,6 +602,15 @@ export default function App() {
               ) : new Date()
             }));
             setData(parsedData);
+
+            // Auto-init dates based on the loaded data range
+            const validDates = parsedData.map(d => d.date.getTime()).filter(t => !isNaN(t) && t > 0);
+            if (validDates.length > 0) {
+              const minT = Math.min(...validDates);
+              const maxT = Math.max(...validDates);
+              setDateFilterStart(safeFormat(new Date(minT), 'yyyy-MM-dd'));
+              setDateFilterEnd(safeFormat(new Date(maxT), 'yyyy-MM-dd'));
+            }
           }
         }
         setLastSyncTime(new Date());
@@ -610,14 +630,10 @@ export default function App() {
   }, [user]);
 
   useEffect(() => {
-    if (globalDateRange.min && globalDateRange.max) {
-      // Only auto-init if currently empty or explicitly at placeholder defaults
-      const currentStart = dateFilterStart;
-      const currentEnd = dateFilterEnd;
-      if (!currentStart || !currentEnd || currentStart.includes('2026-01-01')) { // assuming 2026-01-01 is roughly what I set before
-         setDateFilterStart(safeFormat(globalDateRange.min, 'yyyy-MM-dd'));
-         setDateFilterEnd(safeFormat(globalDateRange.max, 'yyyy-MM-dd'));
-      }
+    // This effect is now secondary, primarily for when data changes locally
+    if (globalDateRange.min && globalDateRange.max && !dateFilterStart && !dateFilterEnd) {
+      setDateFilterStart(safeFormat(globalDateRange.min, 'yyyy-MM-dd'));
+      setDateFilterEnd(safeFormat(globalDateRange.max, 'yyyy-MM-dd'));
     }
   }, [globalDateRange, dateFilterStart, dateFilterEnd]);
 
@@ -630,7 +646,7 @@ export default function App() {
       }
     }, 2000);
     return () => clearTimeout(timer);
-  }, [data, exceptions, hybridSchedules, generalExceptions, particularIncidents, processedDates, uploadHistory, schedule, satSchedule, appOptions, tolerances, theme]);
+  }, [data, exceptions, hybridSchedules, generalExceptions, particularIncidents, processedDates, uploadHistory, schedule, satSchedule, appOptions, tolerances, theme, userPermissions]);
 
   const [fileName, setFileName] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
@@ -1213,6 +1229,16 @@ export default function App() {
     reader.readAsArrayBuffer(file);
   };
 
+  const filteredData = useMemo(() => {
+    if (viewScope === 'total') return data;
+    return data.filter(r => matchesFlexible(r.employeeName, viewScope));
+  }, [data, viewScope]);
+
+  const filteredParticularIncidents = useMemo(() => {
+    if (viewScope === 'total') return particularIncidents;
+    return particularIncidents.filter(inc => matchesFlexible(inc.employeeName, viewScope));
+  }, [particularIncidents, viewScope]);
+
   const [confirmModal, setConfirmModal] = useState<{
     isOpen: boolean;
     title: string;
@@ -1221,45 +1247,6 @@ export default function App() {
     confirmLabel?: string;
     isDangerous?: boolean;
   } | null>(null);
-
-  const [loginMessage, setLoginMessage] = useState<string | null>(null);
-
-  const [pendingAction, setPendingAction] = useState<(() => void) | null>(null);
-
-  const checkAdmin = (action: () => void) => {
-    if (isAdmin) {
-      action();
-    } else {
-      setPendingAction(() => action);
-      setLoginMessage("⚠️ Se requieren permisos de administración para realizar esta acción.");
-      setShowLoginModal(true);
-    }
-  };
-
-  const handleAdminModalLogin = (e: React.FormEvent) => {
-    e.preventDefault();
-    const inputUser = (loginForm.user || '').trim();
-    const inputPassword = (loginForm.password || '').trim();
-    
-    // Check credentials (case-insensitive for username as a courtesy)
-    if (inputUser.toLowerCase() === 'jlab1338' && inputPassword === 'Laboral2026') {
-      setIsAdmin(true);
-      localStorage.setItem('timetrack_is_admin', 'true');
-      setShowLoginModal(false);
-      setLoginMessage(null);
-      setLoginForm({ user: '', password: '' });
-      
-      if (pendingAction) {
-        // Ejecutar la acción pendiente con un pequeño retraso para asegurar que isAdmin se propague
-        setTimeout(() => {
-          pendingAction();
-          setPendingAction(null);
-        }, 100);
-      }
-    } else {
-      setLoginMessage("❌ Credenciales incorrectas. Intente nuevamente.");
-    }
-  };
 
   const handleBulkLoad = () => {
     if (!bulkText.trim()) return;
@@ -1318,7 +1305,7 @@ export default function App() {
 
   const analyzedResults = useMemo(() => {
     const resultsMap: Record<string, AnalysisResult> = {};
-    const filteredByDate = data.filter(record => {
+    const filteredByDate = filteredData.filter(record => {
       try {
         const rDate = record.date && typeof (record.date as any).toDate === 'function' ? (record.date as any).toDate() : (record.date instanceof Date ? record.date : new Date(record.date));
         if (!rDate || isInvalidDate(rDate)) return false;
@@ -1523,7 +1510,7 @@ export default function App() {
       
       // Module 2: Check for Particular Incident Justification
       const findParticularIncident = (type: IncidentType) => {
-        return particularIncidents.find(pi => 
+        return filteredParticularIncidents.find(pi => 
           pi.status === 'ACTIVO' &&
           pi.type === type &&
           pi.date === safeFormat(record.date, 'yyyy-MM-dd') &&
@@ -1543,7 +1530,7 @@ export default function App() {
       const isMissing = !record.entryTime || !record.exitTime;
 
       // Module 2.5: Check for Absence Justification
-      const absenceJustification = particularIncidents.find(pi => 
+      const absenceJustification = filteredParticularIncidents.find(pi => 
         pi.status === 'ACTIVO' &&
         pi.type as string === 'AUSENCIA' &&
         pi.date === safeFormat(record.date, 'yyyy-MM-dd') &&
@@ -1641,7 +1628,7 @@ export default function App() {
     return Object.values(resultsMap)
       .filter(r => matchesFlexible(r.employeeName, searchTerm))
       .sort((a,b) => a.employeeName.localeCompare(b.employeeName));
-  }, [data, exceptions, hybridSchedules, generalExceptions, particularIncidents, schedule, satSchedule, appOptions, activeDays, tolerances, searchTerm, showAllDays, dateFilterStart, dateFilterEnd, filterLateness, filterEarlyExit, filterMissing, allWorkerNames]);
+  }, [filteredData, exceptions, hybridSchedules, generalExceptions, filteredParticularIncidents, schedule, satSchedule, appOptions, activeDays, tolerances, searchTerm, showAllDays, dateFilterStart, dateFilterEnd, filterLateness, filterEarlyExit, filterMissing, allWorkerNames]);
 
   const groupedByWeek = useMemo(() => {
     const allRecords: any[] = [];
@@ -1979,10 +1966,9 @@ export default function App() {
             <p className="text-[10px] text-slate-500 font-medium mb-2 truncate px-2">{fileName || "Planilla Clock-In"}</p>
             <label 
               onClick={(e) => {
-                if (!isAdmin) {
+                if (!isEditor) {
                   e.preventDefault();
-                  setLoginMessage("⚠️ Se requieren permisos de administración para subir archivos.");
-                  setShowLoginModal(true);
+                  alert("⚠️ Se requieren permisos de edición para subir archivos.");
                 }
               }}
               className="block px-3 py-1.5 bg-blue-600 text-white text-xs rounded-lg font-semibold hover:bg-blue-700 transition-colors w-full cursor-pointer"
@@ -1993,59 +1979,28 @@ export default function App() {
                 className="hidden" 
                 accept=".xlsx, .xls, .csv" 
                 onChange={(e) => {
-                  if (isAdmin) handleFileUpload(e);
+                  if (isEditor) handleFileUpload(e);
                 }} 
               />
             </label>
           </div>
 
-          {isAdmin ? (
-            <div className="bg-green-50 border border-green-100 rounded-2xl p-4 animate-in fade-in zoom-in-95 duration-300">
-              <div className="flex items-center gap-3 mb-3">
-                <div className="w-10 h-10 bg-green-500 rounded-xl flex items-center justify-center text-white shadow-lg shadow-green-200 uppercase font-black text-xs">
-                  <ShieldCheck className="w-6 h-6" />
-                </div>
-                <div>
-                  <p className="text-[10px] font-black text-green-600 uppercase tracking-widest">Acceso</p>
-                  <p className="text-xs font-black text-slate-800">Administrador</p>
-                </div>
+          <div className="bg-slate-50 border border-slate-100 rounded-2xl p-4 animate-in fade-in zoom-in-95 duration-300">
+            <div className="flex items-center gap-3">
+              <div className={cn(
+                "w-10 h-10 rounded-xl flex items-center justify-center text-white shadow-lg uppercase font-black text-xs",
+                isAdmin ? "bg-indigo-600 shadow-indigo-100" : isEditor ? "bg-emerald-600 shadow-emerald-100" : "bg-slate-400 shadow-slate-100"
+              )}>
+                {isAdmin ? <ShieldCheck className="w-6 h-6" /> : isEditor ? <Edit3 className="w-6 h-6" /> : <Eye className="w-6 h-6" />}
               </div>
-              <button 
-                onClick={() => {
-                  setConfirmModal({
-                    isOpen: true,
-                    title: 'Cerrar Sesión',
-                    message: '¿Cerrar sesión administrativa? Las funciones de edición se bloquearán.',
-                    confirmLabel: 'Cerrar Sesión',
-                    isDangerous: true,
-                    onConfirm: () => {
-                      setIsAdmin(false);
-                      localStorage.setItem('timetrack_is_admin', 'false');
-                      setConfirmModal(null);
-                    }
-                  });
-                }}
-                className="w-full flex items-center justify-center gap-2 py-2 bg-white border border-slate-200 rounded-lg text-[10px] font-bold uppercase tracking-tight hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-all active:scale-95"
-              >
-                <LogOut className="w-3 h-3" /> Cerrar Sesión
-              </button>
+              <div>
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Acceso</p>
+                <p className="text-xs font-black text-slate-800">
+                  {isAdmin ? 'Administrador' : isEditor ? 'Editor' : 'Lectura'}
+                </p>
+              </div>
             </div>
-          ) : (
-            <button 
-              onClick={() => setShowLoginModal(true)}
-              className="w-full group flex items-center justify-between p-3 bg-slate-100 hover:bg-white border hover:border-slate-800 rounded-xl transition-all"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-8 h-8 bg-slate-200 group-hover:bg-slate-800 rounded-lg flex items-center justify-center text-slate-400 group-hover:text-white transition-all">
-                  <Lock className="w-4 h-4" />
-                </div>
-                <div className="text-left">
-                  <p className="text-[10px] font-black text-slate-700 uppercase">Modo Lectura</p>
-                </div>
-              </div>
-              <Key className="w-3.5 h-3.5 text-slate-300 group-hover:text-slate-800" />
-            </button>
-          )}
+          </div>
         </div>
       </aside>
 
@@ -2087,7 +2042,7 @@ export default function App() {
                 <div className="flex items-center gap-3 pl-3 border-l border-slate-100">
                   <div className="text-right hidden md:block">
                     <p className="text-[10px] font-black text-slate-400 uppercase leading-none mb-1">
-                      {isAdmin ? 'Panel de Editor' : 'Modo Lectura'}
+                      {isAdmin ? 'Administrador' : isEditor ? 'Editor' : 'Modo Lectura'}
                     </p>
                     <p className="text-xs font-bold text-slate-700 leading-none capitalize">
                       {user.displayName?.toLowerCase() || 'Usuario'}
@@ -2759,7 +2714,7 @@ export default function App() {
                       </button>
                     )}
                     <button 
-                      onClick={() => checkAdmin(() => {
+                      onClick={() => checkPermission(() => {
                         if (!newHybrid.employeeName) return alert("Ingrese el nombre");
                         const activeDays = (Object.values(newHybrid.daysConfig || {}) as any[]).some(c => c?.isTelework);
                         if (!activeDays) return alert("Debe seleccionar al menos un día");
@@ -2767,13 +2722,13 @@ export default function App() {
                         if (editingHybridId) {
                           const cleanedName = cleanNameForDisplay(newHybrid.employeeName);
                           setHybridSchedules(hybridSchedules.map(h => 
-                            h.id === editingHybridId ? { ...newHybrid, employeeName: cleanedName, id: editingHybridId } : h
+                            h.id === editingHybridId ? { ...newHybrid, employeeName: cleanedName, id: editingHybridId, lastModified: createAudit() } : h
                           ));
                           setEditingHybridId(null);
                         } else {
-                          const id = Math.random().toString(36).substr(2, 9);
+                          const id = generateId();
                           const cleanedName = cleanNameForDisplay(newHybrid.employeeName);
-                          setHybridSchedules([{id, ...newHybrid, employeeName: cleanedName}, ...hybridSchedules]);
+                          setHybridSchedules([{id, ...newHybrid, employeeName: cleanedName, lastModified: createAudit()}, ...hybridSchedules]);
                         }
                         
                         setNewHybrid({
@@ -2821,6 +2776,11 @@ export default function App() {
                         <tr key={h.id} className="text-sm">
                           <td className="px-6 py-4">
                             <div className="font-bold text-slate-700">{h.employeeName}</div>
+                            {h.lastModified && (
+                              <div className="text-[10px] text-slate-400 font-medium mt-1">
+                                👋 Modificado por: {h.lastModified.byName} ({safeFormat(new Date(h.lastModified.at), 'dd/MM/yy HH:mm')})
+                              </div>
+                            )}
                           </td>
                           <td className="px-6 py-4 tabular-nums text-slate-500">
                             {safeFormat(safeParseDate(h.startDate), 'dd/MM/yy')} - {safeFormat(safeParseDate(h.endDate), 'dd/MM/yy')}
@@ -2848,7 +2808,7 @@ export default function App() {
                           <td className="px-6 py-4 text-right">
                             <div className="flex justify-end gap-2">
                               <button 
-                                onClick={() => checkAdmin(() => {
+                                onClick={() => checkPermission(() => {
                                   setEditingHybridId(h.id);
                                   setNewHybrid({
                                     employeeName: h.employeeName,
@@ -2865,7 +2825,7 @@ export default function App() {
                                 <Pencil className="w-4 h-4" />
                               </button>
                               <button 
-                                onClick={() => checkAdmin(() => {
+                                onClick={() => checkPermission(() => {
                                   setConfirmModal({
                                     isOpen: true,
                                     title: '¿Eliminar Plan Híbrido?',
@@ -2978,12 +2938,12 @@ export default function App() {
                         {isAdmin && (
                           <div className="lg:col-span-2">
                             <button 
-                              onClick={() => checkAdmin(() => {
+                              onClick={() => checkPermission(() => {
                                 if (!newGeneralEx.description.trim() || !newGeneralEx.date) return alert("Complete los campos");
-                                const id = Math.random().toString(36).substr(2, 9);
-                                setGeneralExceptions([{id, ...newGeneralEx}, ...generalExceptions]);
+                                const id = generateId();
+                                setGeneralExceptions([{id, ...newGeneralEx, lastModified: createAudit()}, ...generalExceptions]);
                                 setNewGeneralEx({ description: '', date: safeFormat(new Date(), 'yyyy-MM-dd'), type: 'ATRASO' });
-                              })}
+                              }, 'editor')}
                               className={cn(
                                 "w-full h-11 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95",
                                 newGeneralEx.description.trim() ? "bg-blue-600 hover:bg-blue-700 shadow-blue-100" : "bg-slate-400 cursor-not-allowed"
@@ -3034,6 +2994,11 @@ export default function App() {
                                     <Info className="w-3.5 h-3.5 opacity-30" />
                                     {ex.description || '-'}
                                   </div>
+                                  {ex.lastModified && (
+                                    <div className="text-[9px] text-slate-400 font-medium mt-0.5">
+                                      Por: {ex.lastModified.byName} el {safeFormat(new Date(ex.lastModified.at), 'dd/MM/yy HH:mm')}
+                                    </div>
+                                  )}
                                 </td>
                                 <td className="px-6 py-3 text-center">
                                   <span className="px-2.5 py-1 bg-green-50 text-green-700 text-[10px] font-black rounded-lg border border-green-200">ACTIVO</span>
@@ -3041,7 +3006,7 @@ export default function App() {
                                 <td className="px-6 py-3 text-right">
                                    {isAdmin && (
                                      <button 
-                                      onClick={() => checkAdmin(() => {
+                                      onClick={() => checkPermission(() => {
                                         setConfirmModal({
                                           isOpen: true,
                                           title: '¿Eliminar Excepción?',
@@ -3173,13 +3138,13 @@ export default function App() {
 
                         <div className="lg:col-span-3">
                           <button 
-                            onClick={() => checkAdmin(() => {
+                            onClick={() => checkPermission(() => {
                               if (!newParticularIncident.employeeName || !newParticularIncident.date || !newParticularIncident.description.trim()) {
                                 return alert("Complete los campos");
                               }
-                              const id = Math.random().toString(36).substr(2, 9);
+                              const id = generateId();
                               const cleanedName = cleanNameForDisplay(newParticularIncident.employeeName);
-                              setParticularIncidents([{id, ...newParticularIncident, employeeName: cleanedName}, ...particularIncidents]);
+                              setParticularIncidents([{id, ...newParticularIncident, employeeName: cleanedName, lastModified: createAudit()}, ...particularIncidents]);
                               setNewParticularIncident({
                                 employeeName: '',
                                 date: safeFormat(new Date(), 'yyyy-MM-dd'),
@@ -3187,7 +3152,7 @@ export default function App() {
                                 description: '',
                                 status: 'ACTIVO'
                               });
-                            })}
+                            }, 'editor')}
                             disabled={!newParticularIncident.description.trim() || !newParticularIncident.employeeName}
                             className={cn(
                               "w-full h-11 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95",
@@ -3216,10 +3181,10 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100 font-bold">
-                          {particularIncidents.length === 0 ? (
+                          {filteredParticularIncidents.length === 0 ? (
                             <tr><td colSpan={6} className="px-6 py-10 text-center text-slate-400 italic text-xs">No hay incidentes registrados</td></tr>
                           ) : (
-                            particularIncidents.map(pi => (
+                            filteredParticularIncidents.map(pi => (
                               <tr key={pi.id} className="text-xs hover:bg-slate-50/50 transition-colors">
                                 <td className="px-6 py-3 text-slate-800">{pi.employeeName}</td>
                                 <td className="px-6 py-3 text-center tabular-nums text-slate-500">
@@ -3248,9 +3213,9 @@ export default function App() {
                                   <span className="px-2.5 py-1 bg-green-50 text-green-700 text-[10px] font-black rounded-lg border border-green-200">ACTIVO</span>
                                 </td>
                                  <td className="px-6 py-3 text-right">
-                                   {isAdmin && (
+                                   {isEditor && (
                                      <button 
-                                      onClick={() => checkAdmin(() => {
+                                      onClick={() => checkPermission(() => {
                                         setConfirmModal({
                                           isOpen: true,
                                           title: '¿Eliminar Incidente?',
@@ -3262,7 +3227,7 @@ export default function App() {
                                             setConfirmModal(null);
                                           }
                                         });
-                                      })}
+                                      }, 'editor')}
                                       className="text-red-500 hover:bg-red-50 transition-colors p-2 rounded-lg"
                                     >
                                       <Trash2 className="w-4 h-4" />
@@ -3358,14 +3323,14 @@ export default function App() {
                         </select>
                       </div>
                       <button 
-                        onClick={() => checkAdmin(() => {
+                        onClick={() => checkPermission(() => {
                           if (!newEx.employeeName || !newEx.startDate || !newEx.endDate) {
                             alert("Completa los campos obligatorios.");
                             return;
                           }
-                          const id = Math.random().toString(36).substr(2, 9);
+                          const id = generateId();
                           const cleanedName = cleanNameForDisplay(newEx.employeeName);
-                          setExceptions([{id, ...newEx, employeeName: cleanedName}, ...exceptions]);
+                          setExceptions([{id, ...newEx, employeeName: cleanedName, lastModified: createAudit()}, ...exceptions]);
                           setNewEx({
                             employeeName: '',
                             startDate: safeFormat(new Date(), 'dd/MM/yyyy'),
@@ -3373,7 +3338,7 @@ export default function App() {
                             deferredEntryTime: '07:30',
                             deferredExitTime: '15:30'
                           });
-                        })}
+                        }, 'editor')}
                         className="h-10 bg-blue-600 text-white rounded-lg text-xs font-bold hover:bg-blue-700 transition-all flex items-center justify-center gap-2"
                       >
                         <Plus className="w-4 h-4" /> Agregar Registro
@@ -3453,6 +3418,11 @@ export default function App() {
                         <tr key={ex.id} className="group hover:bg-slate-50 transition-colors">
                           <td className="px-6 py-4">
                             <p className="text-sm font-bold text-slate-700">{ex.employeeName}</p>
+                            {ex.lastModified && (
+                              <div className="text-[10px] text-slate-400 font-medium mt-0.5">
+                                Modificado por: {ex.lastModified.byName} ({safeFormat(new Date(ex.lastModified.at), 'dd/MM/yy HH:mm')})
+                              </div>
+                            )}
                           </td>
                           <td className="px-6 py-4">
                             <p className="text-xs text-slate-500 font-medium">{formatToDMY(ex.startDate)} — {formatToDMY(ex.endDate)}</p>
@@ -3467,20 +3437,20 @@ export default function App() {
                           <td className="px-6 py-4">
                             <div className="flex justify-end items-center gap-2">
                               <button 
-                                onClick={() => checkAdmin(() => { 
+                                onClick={() => checkPermission(() => { 
                                   setItemToEdit({
                                     ...ex,
                                     startDate: formatToDMY(ex.startDate),
                                     endDate: formatToDMY(ex.endDate)
                                   }); 
                                   setIsEditModalOpen(true); 
-                                })}
+                                }, 'editor')}
                                 className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-100 text-slate-600 rounded-lg text-[10px] font-bold hover:bg-slate-200 transition-colors"
                               >
                                 <Edit2 className="w-3 h-3" /> Modificar
                               </button>
                               <button 
-                                onClick={() => checkAdmin(() => { setItemToDelete(ex.id); setIsDeleteModalOpen(true); })}
+                                onClick={() => checkPermission(() => { setItemToDelete(ex.id); setIsDeleteModalOpen(true); }, 'editor')}
                                 className="flex items-center justify-center p-1.5 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
                               >
                                 <Trash2 className="w-4 h-4" />
@@ -3648,7 +3618,7 @@ export default function App() {
                                      <button 
                                        onClick={(e) => {
                                          e.preventDefault();
-                                         checkAdmin(() => {
+                                         checkPermission(() => {
                                             setConfirmModal({
                                               isOpen: true,
                                               title: '¿Eliminar Carga de Datos?',
@@ -3708,7 +3678,7 @@ export default function App() {
                             </button>
                             {isAdmin && (
                               <button 
-                                onClick={() => checkAdmin(() => {
+                                onClick={() => checkPermission(() => {
                                    setConfirmModal({
                                      isOpen: true,
                                      title: '🚨 ¿LIMPIAR TODO?',
@@ -3763,6 +3733,103 @@ export default function App() {
                   </div>
                 </div>
 
+                {isAdmin && (
+                  <div className="bg-white p-6 rounded-3xl border border-slate-200 shadow-sm space-y-6">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-3">
+                        <div className="w-10 h-10 bg-indigo-50 text-indigo-600 rounded-2xl flex items-center justify-center">
+                          <Users className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="font-black text-slate-800 text-sm uppercase tracking-wider">Gestión de Usuarios y Permisos</h3>
+                          <p className="text-[10px] text-slate-400 font-bold uppercase tracking-tight">Usuarios autorizados y roles</p>
+                        </div>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const id = generateId();
+                          setUserPermissions([...userPermissions, { id, email: '', role: 'viewer', scope: 'total' }]);
+                        }}
+                        className="flex items-center gap-2 px-4 py-2 bg-slate-800 text-white rounded-xl text-[10px] font-black hover:bg-slate-700 transition-all shadow-sm"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> AGREGAR USUARIO
+                      </button>
+                    </div>
+
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-left">
+                        <thead>
+                          <tr className="text-[10px] font-black text-slate-400 uppercase tracking-widest border-b border-slate-100">
+                            <th className="pb-3 px-2">Correo Electrónico</th>
+                            <th className="pb-3 px-2">Rol / Permiso</th>
+                            <th className="pb-3 px-2">Alcance de Datos</th>
+                            <th className="pb-3 px-2 text-right">Acciones</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-50">
+                          {userPermissions.map((perm, idx) => (
+                            <tr key={perm.id || idx}>
+                              <td className="py-3 px-2">
+                                <input 
+                                  type="email"
+                                  value={perm.email}
+                                  onChange={(e) => {
+                                    const updated = [...userPermissions];
+                                    updated[idx].email = e.target.value;
+                                    setUserPermissions(updated);
+                                  }}
+                                  placeholder="usuario@gmail.com"
+                                  className="w-full bg-slate-50 border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none focus:ring-1 focus:ring-blue-500"
+                                />
+                              </td>
+                              <td className="py-3 px-2">
+                                <select 
+                                  value={perm.role}
+                                  onChange={(e) => {
+                                    const updated = [...userPermissions];
+                                    updated[idx].role = e.target.value as UserRole;
+                                    setUserPermissions(updated);
+                                  }}
+                                  className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none cursor-pointer"
+                                >
+                                  <option value="admin">Administrador</option>
+                                  <option value="editor">Editor</option>
+                                  <option value="viewer">Solo Lectura</option>
+                                </select>
+                              </td>
+                              <td className="py-3 px-2">
+                                <select 
+                                  value={perm.scope}
+                                  onChange={(e) => {
+                                    const updated = [...userPermissions];
+                                    updated[idx].scope = e.target.value;
+                                    setUserPermissions(updated);
+                                  }}
+                                  className="bg-white border border-slate-200 rounded-lg p-2 text-xs font-bold outline-none cursor-not-allowed disabled:opacity-50"
+                                  disabled={perm.role === 'admin'}
+                                >
+                                  <option value="total">Toda la Aplicación</option>
+                                  {workerNames.map(name => (
+                                    <option key={name} value={name}>{name}</option>
+                                  ))}
+                                </select>
+                              </td>
+                              <td className="py-3 px-2 text-right">
+                                <button 
+                                  onClick={() => setUserPermissions(userPermissions.filter((_, i) => i !== idx))}
+                                  className="p-2 text-red-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+                )}
+
                 <div className="flex items-center gap-1 bg-slate-100 p-1.5 rounded-2xl w-fit">
                    {(['horarios', 'tolerancias'] as const).map(t => (
                      <button
@@ -3783,6 +3850,14 @@ export default function App() {
                 {configActiveTab === 'horarios' ? (
                   <div className="space-y-4">
                     <div className="bg-white p-5 rounded-3xl border border-slate-200 shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Jornadas Base</h3>
+                        {schedule.lastModified && (
+                          <p className="text-[10px] text-slate-400 font-medium">
+                            Último cambio por: {schedule.lastModified.byName} ({safeFormat(new Date(schedule.lastModified.at), 'dd/MM/yy HH:mm')})
+                          </p>
+                        )}
+                      </div>
                       <div className="grid grid-cols-1 md:grid-cols-2 gap-8 divide-y md:divide-y-0 md:divide-x divide-slate-100">
                         {/* General Schedule */}
                         <div className="space-y-4 pr-0 md:pr-4">
@@ -3802,7 +3877,7 @@ export default function App() {
                               <input 
                                 type="time" 
                                 value={schedule.entry || ''} 
-                                onChange={(e) => isAdmin ? setSchedule({...schedule, entry: e.target.value}) : checkAdmin(() => {})}
+                                onChange={(e) => checkPermission(() => setSchedule({...schedule, entry: e.target.value, lastModified: createAudit()}), 'admin')}
                                 className="w-full text-base font-bold p-2 bg-slate-50 border border-slate-100 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 transition-all tabular-nums"
                               />
                             </div>
@@ -3811,7 +3886,7 @@ export default function App() {
                               <input 
                                 type="time" 
                                 value={schedule.exit || ''} 
-                                onChange={(e) => isAdmin ? setSchedule({...schedule, exit: e.target.value}) : checkAdmin(() => {})}
+                                onChange={(e) => checkPermission(() => setSchedule({...schedule, exit: e.target.value, lastModified: createAudit()}), 'admin')}
                                 className="w-full text-base font-bold p-2 bg-slate-50 border border-slate-100 rounded-lg outline-none focus:ring-2 focus:ring-blue-500 transition-all tabular-nums"
                               />
                             </div>
@@ -3824,12 +3899,12 @@ export default function App() {
                              return (
                                <button 
                                  key={day}
-                                 onClick={() => checkAdmin(() => {
+                                 onClick={() => checkPermission(() => {
                                     const newDays = isActive 
                                       ? activeDays.general.filter((d: number) => d !== dayNumber)
                                       : [...activeDays.general, dayNumber];
-                                    setActiveDays({...activeDays, general: newDays});
-                                 })}
+                                    setActiveDays({...activeDays, general: newDays, lastModified: createAudit()});
+                                 }, 'admin')}
                                  className={cn(
                                    "w-7 h-7 rounded-lg text-[10px] font-black transition-all border",
                                    isActive 
@@ -3862,7 +3937,7 @@ export default function App() {
                               <input 
                                 type="time" 
                                 value={satSchedule.entry || ''} 
-                                onChange={(e) => isAdmin ? setSatSchedule({...satSchedule, entry: e.target.value}) : checkAdmin(() => {})}
+                                onChange={(e) => checkPermission(() => setSatSchedule({...satSchedule, entry: e.target.value, lastModified: createAudit()}), 'admin')}
                                 className="w-full text-base font-bold p-2 bg-slate-50 border border-slate-100 rounded-lg outline-none focus:ring-2 focus:ring-orange-500 transition-all tabular-nums"
                               />
                             </div>
@@ -3871,7 +3946,7 @@ export default function App() {
                               <input 
                                 type="time" 
                                 value={satSchedule.exit || ''} 
-                                onChange={(e) => isAdmin ? setSatSchedule({...satSchedule, exit: e.target.value}) : checkAdmin(() => {})}
+                                onChange={(e) => checkPermission(() => setSatSchedule({...satSchedule, exit: e.target.value, lastModified: createAudit()}), 'admin')}
                                 className="w-full text-base font-bold p-2 bg-slate-50 border border-slate-100 rounded-lg outline-none focus:ring-2 focus:ring-orange-500 transition-all tabular-nums"
                               />
                             </div>
@@ -3884,12 +3959,12 @@ export default function App() {
                              return (
                                <button 
                                  key={day}
-                                 onClick={() => checkAdmin(() => {
+                                 onClick={() => checkPermission(() => {
                                     const newDays = isActive 
                                       ? activeDays.saturday.filter((d: number) => d !== dayNumber)
                                       : [...activeDays.saturday, dayNumber];
-                                    setActiveDays({...activeDays, saturday: newDays});
-                                 })}
+                                    setActiveDays({...activeDays, saturday: newDays, lastModified: createAudit()});
+                                 }, 'admin')}
                                  className={cn(
                                    "w-7 h-7 rounded-lg text-[10px] font-black transition-all border",
                                    isActive 
@@ -3910,7 +3985,7 @@ export default function App() {
                        <h3 className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-4">Registro Automático</h3>
                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <button 
-                            onClick={() => checkAdmin(() => setAppOptions({...appOptions, autoLate: !appOptions.autoLate}))}
+                            onClick={() => checkPermission(() => setAppOptions({...appOptions, autoLate: !appOptions.autoLate, lastModified: createAudit()}), 'admin')}
                             className="flex items-center gap-3 text-left p-3 rounded-2xl hover:bg-slate-50 transition-colors border border-transparent hover:border-slate-100"
                           >
                             <div className={cn("w-10 h-5 rounded-full relative transition-colors shrink-0", appOptions.autoLate ? "bg-blue-600" : "bg-slate-200")}>
@@ -3923,7 +3998,7 @@ export default function App() {
                            </button>
 
                            <button 
-                            onClick={() => checkAdmin(() => setAppOptions({...appOptions, earlyExit: !appOptions.earlyExit}))}
+                            onClick={() => checkPermission(() => setAppOptions({...appOptions, earlyExit: !appOptions.earlyExit, lastModified: createAudit()}), 'admin')}
                             className="flex items-center gap-3 text-left p-3 rounded-2xl hover:bg-slate-50 transition-colors border border-transparent hover:border-slate-100"
                           >
                             <div className={cn("w-10 h-5 rounded-full relative transition-colors shrink-0", appOptions.earlyExit ? "bg-blue-600" : "bg-slate-200")}>
@@ -3996,7 +4071,7 @@ export default function App() {
                                 onChange={(e) => {
                                   const val = parseInt(e.target.value);
                                   if (val >= (tolerances.entryGrace || 0)) {
-                                    isAdmin ? setTolerances(prev => ({...prev, entryYellow: val, entryRed: val})) : checkAdmin(() => {});
+                                    checkPermission(() => setTolerances(prev => ({...prev, entryYellow: val, entryRed: val, lastModified: createAudit()})), 'admin');
                                   }
                                 }}
                                 className="absolute inset-0 w-full h-full appearance-none bg-transparent pointer-events-none z-30 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-4 [&::-webkit-slider-thumb]:border-red-600 [&::-webkit-slider-thumb]:shadow-lg cursor-pointer"
@@ -4007,7 +4082,7 @@ export default function App() {
                                 onChange={(e) => {
                                   const val = parseInt(e.target.value);
                                   if (val <= (tolerances.entryYellow || 60)) {
-                                    isAdmin ? setTolerances(prev => ({...prev, entryGrace: val})) : checkAdmin(() => {});
+                                    checkPermission(() => setTolerances(prev => ({...prev, entryGrace: val, lastModified: createAudit()})), 'admin');
                                   }
                                 }}
                                 className="absolute inset-0 w-full h-full appearance-none bg-transparent pointer-events-none z-10 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-4 [&::-webkit-slider-thumb]:border-slate-400 [&::-webkit-slider-thumb]:shadow-lg cursor-pointer"
@@ -4099,7 +4174,7 @@ export default function App() {
                                 onChange={(e) => {
                                   const val = parseInt(e.target.value);
                                   if (val >= (tolerances.exitGrace || 0)) {
-                                    isAdmin ? setTolerances(prev => ({...prev, exitYellow: val, exitRed: val})) : checkAdmin(() => {});
+                                    checkPermission(() => setTolerances(prev => ({...prev, exitYellow: val, exitRed: val, lastModified: createAudit()})), 'admin');
                                   }
                                 }}
                                 className="absolute inset-0 w-full h-full appearance-none bg-transparent pointer-events-none z-30 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-4 [&::-webkit-slider-thumb]:border-red-600 [&::-webkit-slider-thumb]:shadow-lg cursor-pointer"
@@ -4110,7 +4185,7 @@ export default function App() {
                                 onChange={(e) => {
                                   const val = parseInt(e.target.value);
                                   if (val <= (tolerances.exitYellow || 60)) {
-                                    isAdmin ? setTolerances(prev => ({...prev, exitGrace: val})) : checkAdmin(() => {});
+                                    checkPermission(() => setTolerances(prev => ({...prev, exitGrace: val, lastModified: createAudit()})), 'admin');
                                   }
                                 }}
                                 className="absolute inset-0 w-full h-full appearance-none bg-transparent pointer-events-none z-10 [&::-webkit-slider-thumb]:pointer-events-auto [&::-webkit-slider-thumb]:w-6 [&::-webkit-slider-thumb]:h-6 [&::-webkit-slider-thumb]:appearance-none [&::-webkit-slider-thumb]:rounded-full [&::-webkit-slider-thumb]:bg-white [&::-webkit-slider-thumb]:border-4 [&::-webkit-slider-thumb]:border-slate-400 [&::-webkit-slider-thumb]:shadow-lg cursor-pointer"
@@ -4157,77 +4232,6 @@ export default function App() {
         </div>
       </main>
 
-      {/* Login Modal */}
-      <AnimatePresence>
-        {showLoginModal && (
-          <div className="fixed inset-0 z-[9999] flex items-center justify-center p-4">
-            <motion.div 
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              exit={{ opacity: 0 }}
-              onClick={() => setShowLoginModal(false)}
-              className="absolute inset-0 bg-slate-900/90 backdrop-blur-xl"
-            />
-            <motion.div 
-              initial={{ opacity: 0, scale: 0.95, y: 20 }}
-              animate={{ opacity: 1, scale: 1, y: 0 }}
-              exit={{ opacity: 0, scale: 0.95, y: 20 }}
-              className="relative w-full max-w-md bg-white rounded-[2rem] shadow-2xl overflow-hidden"
-            >
-              <div className="p-8">
-                <div className="flex justify-between items-center mb-6">
-                  <h3 className="text-base font-black text-slate-800 uppercase tracking-tight">Panel Administrativo</h3>
-                  <button onClick={() => { setShowLoginModal(false); setLoginMessage(null); }} className="text-slate-400 hover:text-slate-600">
-                    <X className="w-6 h-6" />
-                  </button>
-                </div>
-                
-                {loginMessage && (
-                  <motion.div 
-                    initial={{ opacity: 0, y: -10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl text-xs font-bold text-red-600 flex items-center gap-2"
-                  >
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    {loginMessage}
-                  </motion.div>
-                )}
-                
-                <form onSubmit={handleAdminModalLogin} className="space-y-4">
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-1">Usuario</label>
-                    <input 
-                      type="text" 
-                      autoComplete="username"
-                      value={loginForm.user || ''}
-                      onChange={(e) => setLoginForm({...loginForm, user: e.target.value})}
-                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium"
-                      placeholder="Ingrese su usuario"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-1">Contraseña</label>
-                    <input 
-                      type="password" 
-                      autoComplete="current-password"
-                      value={loginForm.password || ''}
-                      onChange={(e) => setLoginForm({...loginForm, password: e.target.value})}
-                      className="w-full p-4 bg-slate-50 border border-slate-200 rounded-2xl outline-none focus:ring-2 focus:ring-blue-500 font-medium"
-                      placeholder="••••••••"
-                    />
-                  </div>
-                  <button 
-                    type="submit"
-                    className="w-full py-4 bg-slate-800 text-white rounded-2xl font-bold hover:bg-slate-700 transition-all shadow-lg active:scale-95"
-                  >
-                    Acceder al Sistema
-                  </button>
-                </form>
-              </div>
-            </motion.div>
-          </div>
-        )}
-      </AnimatePresence>
       <AnimatePresence>
         {selectedUpload && (
           <div className="fixed inset-0 z-[110] flex items-center justify-center p-4">
