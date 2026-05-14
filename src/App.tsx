@@ -65,6 +65,9 @@ import {
 import { es } from 'date-fns/locale';
 import { cn } from './lib/utils';
 import { AttendanceRecord, Exception, AnalysisResult, HybridSchedule, GeneralException, ParticularIncident, IncidentType, UploadHistoryItem } from './types';
+import { auth, db, signInWithGoogle } from './lib/firebase';
+import { onAuthStateChanged, User, signOut } from 'firebase/auth';
+import { doc, getDoc, setDoc, collection, getDocs, writeBatch, query, where } from 'firebase/firestore';
 
 const DEFAULT_ENTRY = '08:00';
 const DEFAULT_EXIT = '16:00';
@@ -352,6 +355,21 @@ export default function App() {
   };
   const [selectedUpload, setSelectedUpload] = useState<UploadHistoryItem | null>(null);
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  useEffect(() => {
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      setAuthLoading(false);
+      
+      // Auto-admin for the owner
+      if (u?.email?.toLowerCase() === 'matiasbaezh@gmail.com') {
+        setIsAdmin(true);
+      }
+    });
+    return unsubscribe;
+  }, []);
 
   const [dateFilterStart, setDateFilterStart] = useState(safeFormat(startOfYear(new Date()), 'yyyy-MM-dd'));
   const [dateFilterEnd, setDateFilterEnd] = useState(safeFormat(new Date(), 'yyyy-MM-dd'));
@@ -442,11 +460,11 @@ export default function App() {
 
   // Sync with server logic
   const syncWithServer = async (action: 'load' | 'save', newData?: any) => {
+    if (!user) return;
     setIsCloudSyncing(true);
     try {
       if (action === 'save') {
         const payload = newData || {
-          data,
           exceptions,
           hybridSchedules,
           generalExceptions,
@@ -455,22 +473,29 @@ export default function App() {
           uploadHistory,
           config: { schedule, satSchedule, appOptions, tolerances, theme }
         };
-        await fetch('/api/data', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(payload)
-        });
+        
+        // Save config and metadata to a single document
+        await setDoc(doc(db, 'settings', 'config'), payload);
+        
+        // Handle data (AttendanceRecord) separately if it changed
+        if (newData?.data || (action === 'save' && !newData)) {
+          const recordsToSave = newData?.data || data;
+          // In a real production app, we would only sync changes.
+          // For this app, we'll use a simplified batch approach for now.
+          // Note: This is still limited by batch size (500).
+          // Better: If they are many, we might need a better sync strategy.
+          // For now, let's just save the current records if they fit in the document or uses a few docs.
+          
+          // Actually, saving thousands of records one by one is slow.
+          // Let's store records in chunks or just as one blob in a dedicated doc if under 1MB.
+          // 1MB is usually enough for ~5000 attendance records.
+          await setDoc(doc(db, 'app_data', 'records_blob'), { data: recordsToSave });
+        }
       } else {
-        const res = await fetch('/api/data');
-        if (res.ok) {
-          const cloudData = await res.json();
-          if (cloudData.data) {
-            const parsedData = cloudData.data.map((r: any) => ({
-              ...r,
-              date: r.date ? (typeof r.date === 'string' ? parseISO(r.date) : new Date(r.date)) : new Date()
-            }));
-            setData(parsedData);
-          }
+        // Load from Firestore
+        const configSnap = await getDoc(doc(db, 'settings', 'config'));
+        if (configSnap.exists()) {
+          const cloudData = configSnap.data();
           if (cloudData.exceptions) setExceptions(cloudData.exceptions);
           if (cloudData.hybridSchedules) setHybridSchedules(cloudData.hybridSchedules);
           if (cloudData.generalExceptions) setGeneralExceptions(cloudData.generalExceptions);
@@ -485,17 +510,31 @@ export default function App() {
             setTheme(cloudData.config.theme);
           }
         }
+        
+        const recordsSnap = await getDoc(doc(db, 'app_data', 'records_blob'));
+        if (recordsSnap.exists()) {
+          const { data: cloudRecords } = recordsSnap.data();
+          if (cloudRecords) {
+            const parsedData = cloudRecords.map((r: any) => ({
+              ...r,
+              date: r.date ? (typeof r.date === 'string' ? parseISO(r.date) : new Date(r.date)) : new Date()
+            }));
+            setData(parsedData);
+          }
+        }
       }
     } catch (e) {
-      console.error('Sync error:', e);
+      console.error('Firestore Sync error:', e);
     } finally {
       setIsCloudSyncing(false);
     }
   };
 
   useEffect(() => {
-    syncWithServer('load');
-  }, []);
+    if (user) {
+      syncWithServer('load');
+    }
+  }, [user]);
 
   useEffect(() => {
     if (globalDateRange.min && globalDateRange.max) {
@@ -1663,6 +1702,48 @@ export default function App() {
     }
   };
 
+  if (authLoading) {
+    return (
+      <div className="h-screen w-full flex items-center justify-center bg-slate-50">
+        <motion.div 
+          animate={{ rotate: 360 }}
+          transition={{ duration: 1, repeat: Infinity, ease: 'linear' }}
+          className="w-10 h-10 border-4 border-blue-600 border-t-transparent rounded-full"
+        />
+      </div>
+    );
+  }
+
+  if (!user) {
+    return (
+      <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-50 p-4">
+        <motion.div 
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          className="bg-white p-10 rounded-[3rem] shadow-xl border border-slate-200 max-w-md w-full text-center"
+        >
+          <div className="w-20 h-20 bg-blue-600 rounded-3xl mx-auto mb-8 flex items-center justify-center text-white shadow-lg shadow-blue-200">
+            <Clock className="w-10 h-10" />
+          </div>
+          <h1 className="text-3xl font-black text-slate-900 mb-2 uppercase tracking-tight">TimeTrack</h1>
+          <p className="text-slate-500 mb-10 font-medium">Control de asistencia y gestión laboral con persistencia en la nube.</p>
+          
+          <button 
+            onClick={signInWithGoogle}
+            className="w-full flex items-center justify-center gap-4 py-4 px-6 bg-white border-2 border-slate-100 rounded-2xl text-slate-700 font-bold hover:bg-slate-50 hover:border-blue-100 transition-all active:scale-[0.98] shadow-sm"
+          >
+            <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+            Ingresar con Google
+          </button>
+          
+          <p className="mt-8 text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-loose">
+            Tus datos se sincronizarán<br />automáticamente en todos tus dispositivos.
+          </p>
+        </motion.div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex h-screen w-full bg-slate-50 font-sans text-slate-800 overflow-hidden" style={getThemeStyles() as any}>
       {/* Sidebar */}
@@ -1751,6 +1832,24 @@ export default function App() {
           >
             <Settings className="w-5 h-5 shrink-0" /> <span className="text-sm">Configuración</span>
           </button>
+
+          <div className="pt-4 mt-auto border-t border-slate-100">
+            <div className="flex items-center gap-3 px-4 py-3 mb-2">
+              <div className="w-8 h-8 rounded-full bg-slate-100 border border-slate-200 overflow-hidden shrink-0">
+                {user?.photoURL ? <img src={user.photoURL} alt={user.displayName || ''} /> : <div className="w-full h-full flex items-center justify-center text-slate-400"><Users className="w-4 h-4" /></div>}
+              </div>
+              <div className="flex flex-col min-w-0">
+                <span className="text-xs font-bold text-slate-700 truncate capitalize">{user?.displayName?.toLowerCase() || 'Usuario'}</span>
+                <span className="text-[9px] text-slate-400 truncate">{user?.email}</span>
+              </div>
+            </div>
+            <button 
+              onClick={() => signOut(auth)}
+              className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl text-red-500 hover:bg-red-50 transition-colors"
+            >
+              <LogOut className="w-5 h-5 shrink-0" /> <span className="text-sm">Cerrar Sesión</span>
+            </button>
+          </div>
 
 
           <div className="pt-6 space-y-4">

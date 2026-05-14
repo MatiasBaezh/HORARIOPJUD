@@ -1,0 +1,100 @@
+{
+  "entities": {
+    "AttendanceRecord": {
+      "title": "Attendance Record",
+      "description": "Daily attendance record for an employee",
+      "type": "object",
+      "properties": {
+        "employeeName": { "type": "string" },
+        "date": { "type": "string", "format": "date-time" },
+        "entryTime": { "type": "string" },
+        "exitTime": { "type": "string" }
+      },
+      "required": ["employeeName", "date"]
+    },
+    "Exception": {
+      "title": "Exception",
+      "description": "Deferred entry/exit times for an employee",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "deferredEntryTime": { "type": "string" },
+        "deferredExitTime": { "type": "string" }
+      }
+    },
+    "HybridSchedule": {
+      "title": "Hybrid Schedule",
+      "description": "Telework configuration for an employee",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "startDate": { "type": "string" },
+        "endDate": { "type": "string" },
+        "daysConfig": { "type": "object" }
+      }
+    },
+    "GeneralException": {
+      "title": "General Exception",
+      "description": "Massive impact justification",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "description": { "type": "string" },
+        "date": { "type": "string" },
+        "type": { "type": "string" }
+      }
+    },
+    "ParticularIncident": {
+      "title": "Particular Incident",
+      "description": "Individual justification for an incident",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "employeeName": { "type": "string" },
+        "date": { "type": "string" },
+        "type": { "type": "string" },
+        "description": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    "UploadHistoryItem": {
+      "title": "Upload History Item",
+      "description": "Log of uploaded attendance files",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "fileName": { "type": "string" },
+        "uploadDate": { "type": "string" },
+        "dateRange": { "type": "object" },
+        "recordCount": { "type": "number" }
+      }
+    },
+    "AppConfig": {
+      "title": "App Config",
+      "description": "Global settings and configuration",
+      "type": "object",
+      "properties": {
+        "schedule": { "type": "object" },
+        "satSchedule": { "type": "object" },
+        "appOptions": { "type": "object" },
+        "tolerances": { "type": "object" },
+        "theme": { "type": "object" },
+        "activeDays": { "type": "array" },
+        "processedDates": { "type": "array" }
+      }
+    }
+  },
+  "firestore": {
+    "records": { "schema": "AttendanceRecord", "description": "Attendance logs" },
+    "exceptions": { "schema": "Exception", "description": "Shift definitions" },
+    "hybrid_schedules": { "schema": "HybridSchedule", "description": "Hybrid work plans" },
+    "general_exceptions": { "schema": "GeneralException", "description": "Public holidays or massive justifications" },
+    "particular_incidents": { "schema": "ParticularIncident", "description": "Individual justifications" },
+    "upload_history": { "schema": "UploadHistoryItem", "description": "Activity log" },
+    "settings/config": { "schema": "AppConfig", "description": "Global application state" }
+  }
+}
