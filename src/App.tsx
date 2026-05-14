@@ -357,6 +357,8 @@ export default function App() {
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   useEffect(() => {
     const unsubscribe = onAuthStateChanged(auth, (u) => {
@@ -370,6 +372,25 @@ export default function App() {
     });
     return unsubscribe;
   }, []);
+
+  const handleLogin = async () => {
+    setLoginError(null);
+    setIsLoggingIn(true);
+    try {
+      await signInWithGoogle();
+    } catch (error: any) {
+      console.error("Login error:", error);
+      if (error.code === 'auth/popup-blocked') {
+        setLoginError("El navegador bloqueó la ventana emergente. Por favor, permite las ventanas emergentes o abre la app en una pestaña nueva.");
+      } else if (error.code === 'auth/popup-closed-by-user') {
+        // Just silent ignore or a small hint
+      } else {
+        setLoginError("Error al iniciar sesión: " + (error.message || "Intenta nuevamente."));
+      }
+    } finally {
+      setIsLoggingIn(false);
+    }
+  };
 
   const [dateFilterStart, setDateFilterStart] = useState(safeFormat(startOfYear(new Date()), 'yyyy-MM-dd'));
   const [dateFilterEnd, setDateFilterEnd] = useState(safeFormat(new Date(), 'yyyy-MM-dd'));
@@ -1163,7 +1184,7 @@ export default function App() {
     }
   };
 
-  const handleLogin = (e: React.FormEvent) => {
+  const handleAdminModalLogin = (e: React.FormEvent) => {
     e.preventDefault();
     const inputUser = (loginForm.user || '').trim();
     const inputPassword = (loginForm.password || '').trim();
@@ -1715,6 +1736,7 @@ export default function App() {
   }
 
   if (!user) {
+    const isIframe = window.self !== window.top;
     return (
       <div className="h-screen w-full flex flex-col items-center justify-center bg-slate-50 p-4">
         <motion.div 
@@ -1726,14 +1748,31 @@ export default function App() {
             <Clock className="w-10 h-10" />
           </div>
           <h1 className="text-3xl font-black text-slate-900 mb-2 uppercase tracking-tight">TimeTrack</h1>
-          <p className="text-slate-500 mb-10 font-medium">Control de asistencia y gestión laboral con persistencia en la nube.</p>
+          <p className="text-slate-500 mb-8 font-medium">Control de asistencia y gestión laboral con persistencia en la nube.</p>
           
+          {loginError && (
+            <div className="mb-6 p-4 bg-red-50 border border-red-100 rounded-2xl text-red-600 text-xs font-medium text-left">
+              {loginError}
+              {isIframe && <p className="mt-2 font-bold opacity-80 underline">Sugerencia: Abre la aplicación en una pestaña nueva usando el botón en la esquina superior derecha.</p>}
+            </div>
+          )}
+
           <button 
-            onClick={signInWithGoogle}
-            className="w-full flex items-center justify-center gap-4 py-4 px-6 bg-white border-2 border-slate-100 rounded-2xl text-slate-700 font-bold hover:bg-slate-50 hover:border-blue-100 transition-all active:scale-[0.98] shadow-sm"
+            onClick={handleLogin}
+            disabled={isLoggingIn}
+            className={cn(
+              "w-full flex items-center justify-center gap-4 py-4 px-6 bg-white border-2 border-slate-100 rounded-2xl text-slate-700 font-bold hover:bg-slate-50 hover:border-blue-100 transition-all active:scale-[0.98] shadow-sm",
+              isLoggingIn && "opacity-50 cursor-wait"
+            )}
           >
-            <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
-            Ingresar con Google
+            {isLoggingIn ? (
+              <div className="w-5 h-5 border-2 border-slate-300 border-t-slate-600 rounded-full animate-spin" />
+            ) : (
+              <>
+                <img src="https://www.google.com/favicon.ico" className="w-5 h-5" alt="Google" />
+                Ingresar con Google
+              </>
+            )}
           </button>
           
           <p className="mt-8 text-[10px] text-slate-400 font-bold uppercase tracking-widest leading-loose">
@@ -4062,7 +4101,7 @@ export default function App() {
                   </motion.div>
                 )}
                 
-                <form onSubmit={handleLogin} className="space-y-4">
+                <form onSubmit={handleAdminModalLogin} className="space-y-4">
                   <div className="space-y-1">
                     <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest px-1">Usuario</label>
                     <input 
