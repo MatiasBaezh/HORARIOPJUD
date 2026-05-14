@@ -91,12 +91,14 @@ const PRELOADED_HORARIOS: Exception[] = [
 
 // Helper to parse DD/MM/YYYY or YYYY-MM-DD from exceptions
 const isInvalidDate = (date: any) => {
+  if (date && typeof date.toDate === 'function') return false; 
   if (date instanceof Date) return isNaN(date.getTime());
   return !date || isNaN(new Date(date).getTime());
 };
 
 const parseExDate = (s: string) => {
   if (!s) return new Date();
+  if (typeof s === 'object' && typeof (s as any).toDate === 'function') return (s as any).toDate();
   const parts = String(s).split(/[\/-]/);
   
   let d: Date;
@@ -114,10 +116,14 @@ const parseExDate = (s: string) => {
   return d;
 };
 
-const safeFormat = (date: Date | null | undefined, formatStr: string, fallback = '-') => {
-  if (!date || isInvalidDate(date)) return fallback;
+const safeFormat = (date: any, formatStr: string, fallback = '-') => {
+  if (!date) return fallback;
+  let d = date;
+  if (date && typeof date.toDate === 'function') d = date.toDate();
+  if (isInvalidDate(d)) return fallback;
   try {
-    return format(date, formatStr, { locale: es });
+    const finalDate = (d instanceof Date) ? d : new Date(d);
+    return format(finalDate, formatStr, { locale: es });
   } catch (e) {
     return fallback;
   }
@@ -355,20 +361,44 @@ export default function App() {
   };
   const [selectedUpload, setSelectedUpload] = useState<UploadHistoryItem | null>(null);
   const [isCloudSyncing, setIsCloudSyncing] = useState(false);
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [isLoggingIn, setIsLoggingIn] = useState(false);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (u) => {
+    const unsubscribe = onAuthStateChanged(auth, async (u) => {
       setUser(u);
       setAuthLoading(false);
       
-      // Auto-admin for the owner
-      if (u?.email?.toLowerCase() === 'matiasbaezh@gmail.com') {
-        setIsAdmin(true);
-        localStorage.setItem('timetrack_is_admin', 'true');
+      if (u) {
+        // Clear search term and filters to ensure they see everything on login
+        setSearchTerm('');
+        setFilterLateness(false);
+        setFilterEarlyExit(false);
+        setFilterMissing(false);
+
+        // Auto-admin for the owner
+        if (u.email?.toLowerCase() === 'matiasbaezh@gmail.com') {
+          setIsAdmin(true);
+          localStorage.setItem('timetrack_is_admin', 'true');
+        } else {
+          // Check if user is in admins collection
+          try {
+            const adminSnap = await getDoc(doc(db, 'admins', u.uid));
+            if (adminSnap.exists()) {
+              setIsAdmin(true);
+              localStorage.setItem('timetrack_is_admin', 'true');
+            } else {
+              setIsAdmin(false);
+              localStorage.setItem('timetrack_is_admin', 'false');
+            }
+          } catch (e) {
+            console.error("Error checking admin status:", e);
+            setIsAdmin(false);
+          }
+        }
       }
     });
     return unsubscribe;
@@ -384,7 +414,11 @@ export default function App() {
       if (error.code === 'auth/popup-blocked') {
         setLoginError("El navegador bloqueó la ventana emergente. Por favor, permite las ventanas emergentes o abre la app en una pestaña nueva.");
       } else if (error.code === 'auth/popup-closed-by-user') {
-        // Just silent ignore or a small hint
+        // Just silent ignore
+      } else if (error.code === 'auth/unauthorized-domain') {
+        setLoginError(
+          `Dominio no autorizado. Debes agregar "${window.location.hostname}" a la lista de dominios autorizados en la Consola de Firebase -> Authentication -> Settings -> Authorized domains.`
+        );
       } else {
         setLoginError("Error al iniciar sesión: " + (error.message || "Intenta nuevamente."));
       }
@@ -522,7 +556,13 @@ export default function App() {
           if (cloudData.generalExceptions) setGeneralExceptions(cloudData.generalExceptions);
           if (cloudData.particularIncidents) setParticularIncidents(cloudData.particularIncidents);
           if (cloudData.processedDates) setProcessedDates(cloudData.processedDates);
-          if (cloudData.uploadHistory) setUploadHistory(cloudData.uploadHistory);
+          if (cloudData.uploadHistory) {
+            const parsedHistory = cloudData.uploadHistory.map((h: any) => ({
+              ...h,
+              uploadDate: h.uploadDate && typeof h.uploadDate.toDate === 'function' ? h.uploadDate.toDate().toISOString() : h.uploadDate
+            }));
+            setUploadHistory(parsedHistory);
+          }
           if (cloudData.config) {
             setSchedule(cloudData.config.schedule);
             setSatSchedule(cloudData.config.satSchedule);
@@ -544,11 +584,16 @@ export default function App() {
           if (cloudRecords) {
             const parsedData = cloudRecords.map((r: any) => ({
               ...r,
-              date: r.date ? (typeof r.date === 'string' ? parseISO(r.date) : new Date(r.date)) : new Date()
+              date: r.date ? (
+                typeof r.date === 'string' ? parseISO(r.date) : (
+                  r.date && typeof r.date.toDate === 'function' ? r.date.toDate() : new Date(r.date)
+                )
+              ) : new Date()
             }));
             setData(parsedData);
           }
         }
+        setLastSyncTime(new Date());
       }
     } catch (e) {
       console.error('Firestore Sync error:', e);
@@ -1275,7 +1320,7 @@ export default function App() {
     const resultsMap: Record<string, AnalysisResult> = {};
     const filteredByDate = data.filter(record => {
       try {
-        const rDate = record.date instanceof Date ? record.date : new Date(record.date);
+        const rDate = record.date && typeof (record.date as any).toDate === 'function' ? (record.date as any).toDate() : (record.date instanceof Date ? record.date : new Date(record.date));
         if (!rDate || isInvalidDate(rDate)) return false;
         const d = startOfDay(rDate);
         
@@ -1802,9 +1847,24 @@ export default function App() {
               <h1 className="text-lg font-bold tracking-tight text-slate-900 underline decoration-blue-500/30 decoration-2 underline-offset-4">TimeTrack</h1>
             </div>
             {isCloudSyncing && (
-              <div className="flex items-center gap-1.5 px-2 py-0.5 bg-blue-50/50 text-blue-600 rounded-lg border border-blue-100/50 mt-1">
-                <div className="w-1 h-1 bg-blue-500 rounded-full animate-pulse" />
-                <span className="text-[9px] font-semibold uppercase tracking-wider">Sincronizado</span>
+              <div className={cn(
+                "flex items-center gap-1.5 px-2 py-0.5 rounded-lg border transition-all duration-300",
+                isCloudSyncing 
+                  ? "bg-amber-50 text-amber-600 border-amber-100" 
+                  : "bg-emerald-50 text-emerald-600 border-emerald-100"
+              )}>
+                <div className={cn(
+                  "w-1 h-1 rounded-full",
+                  isCloudSyncing ? "bg-amber-500 animate-pulse" : "bg-emerald-500"
+                )} />
+                <span className="text-[9px] font-black uppercase tracking-wider">
+                  {isCloudSyncing ? "Sincronizando..." : "Nube Sincronizada"}
+                </span>
+                {lastSyncTime && !isCloudSyncing && (
+                   <span className="text-[8px] opacity-60 ml-1 border-l border-emerald-200 pl-1">
+                     {format(lastSyncTime, 'HH:mm')}
+                   </span>
+                )}
               </div>
             )}
           </div>
@@ -2002,38 +2062,51 @@ export default function App() {
                activeTab === 'datos' ? 'Gestión de Datos' :
                'Configuración del Sistema'}
             </h2>
-            <div className="flex items-center gap-2">
-              <span className={cn("px-2.5 py-1 text-[10px] font-semibold rounded-full uppercase tracking-widest border", data.length > 0 ? "bg-emerald-50 text-emerald-700 border-emerald-100" : "bg-slate-100 text-slate-400 border-slate-200")}>
-                {data.length > 0 ? "Estado: Online" : "Estado: Offline"}
-              </span>
-            </div>
-
-          </div>
-          <div className="flex items-center gap-4">
-            {isAdmin ? (
-              <div className="flex items-center gap-4">
-                <div className="text-right">
-                  <p className="text-sm font-semibold">Admin RRHH</p>
-                  <p className="text-xs text-slate-400">Sesión Activa</p>
-                </div>
-                <button 
-                  onClick={() => setIsAdmin(false)}
-                  className="w-10 h-10 bg-slate-800 rounded-full border border-slate-300 flex items-center justify-center font-bold text-white hover:bg-slate-700 transition-colors"
-                >
-                  <X className="w-5 h-5" />
-                </button>
+            <div className="flex items-center gap-3">
+              <div className={cn(
+                "hidden sm:flex items-center gap-1.5 px-3 py-1.5 rounded-full border transition-all duration-300",
+                isCloudSyncing 
+                  ? "bg-amber-50 text-amber-600 border-amber-100" 
+                  : "bg-emerald-50 text-emerald-600 border-emerald-100"
+              )}>
+                <div className={cn(
+                  "w-1.5 h-1.5 rounded-full",
+                  isCloudSyncing ? "bg-amber-500 animate-pulse" : "bg-emerald-500"
+                )} />
+                <span className="text-[10px] font-black uppercase tracking-widest whitespace-nowrap">
+                  {isCloudSyncing ? "Sincronizando..." : "Nube Sincronizada"}
+                </span>
+                {lastSyncTime && !isCloudSyncing && (
+                   <span className="text-[9px] opacity-60 ml-2 border-l border-emerald-200 pl-2 font-medium">
+                     {format(lastSyncTime, 'HH:mm')}
+                   </span>
+                )}
               </div>
-            ) : (
-              <button 
-                onClick={() => setShowLoginModal(true)}
-                className="px-4 py-2 bg-slate-100 text-slate-700 text-sm font-bold rounded-xl hover:bg-slate-200 transition-colors flex items-center gap-2"
-              >
-                <Users className="w-4 h-4" /> Iniciar Sesión
-              </button>
-            )}
+
+              {user && (
+                <div className="flex items-center gap-3 pl-3 border-l border-slate-100">
+                  <div className="text-right hidden md:block">
+                    <p className="text-[10px] font-black text-slate-400 uppercase leading-none mb-1">
+                      {isAdmin ? 'Panel de Editor' : 'Modo Lectura'}
+                    </p>
+                    <p className="text-xs font-bold text-slate-700 leading-none capitalize">
+                      {user.displayName?.toLowerCase() || 'Usuario'}
+                    </p>
+                  </div>
+                  <div className="w-8 h-8 rounded-full border-2 border-white shadow-sm ring-1 ring-slate-100 overflow-hidden shrink-0">
+                    {user.photoURL ? (
+                      <img src={user.photoURL} alt="avatar" className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                    ) : (
+                      <div className="w-full h-full bg-slate-100 flex items-center justify-center text-slate-400">
+                        <Users className="w-4 h-4" />
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
           </div>
         </header>
-
         {/* Content Area */}
         <div className="flex-1 p-4 space-y-4 overflow-y-auto">
           {activeTab === 'report' ? (
@@ -2669,8 +2742,8 @@ export default function App() {
                           setEditingHybridId(null);
                           setNewHybrid({
                             employeeName: '',
-                            startDate: format(new Date(), 'yyyy-MM-dd'),
-                            endDate: format(addMonths(new Date(), 1), 'yyyy-MM-dd'),
+                            startDate: safeFormat(new Date(), 'yyyy-MM-dd'),
+                            endDate: safeFormat(addMonths(new Date(), 1), 'yyyy-MM-dd'),
                             daysConfig: {
                               1: { isTelework: true, isHybrid: false, startTime: '08:00', endTime: '14:00' },
                               2: { isTelework: true, isHybrid: false, startTime: '08:00', endTime: '14:00' },
@@ -2705,8 +2778,8 @@ export default function App() {
                         
                         setNewHybrid({
                           employeeName: '',
-                          startDate: format(new Date(), 'yyyy-MM-dd'),
-                          endDate: format(addMonths(new Date(), 1), 'yyyy-MM-dd'),
+                          startDate: safeFormat(new Date(), 'yyyy-MM-dd'),
+                          endDate: safeFormat(addMonths(new Date(), 1), 'yyyy-MM-dd'),
                           daysConfig: {
                             1: { isTelework: true, isHybrid: false, startTime: '08:00', endTime: '14:00' },
                             2: { isTelework: true, isHybrid: false, startTime: '08:00', endTime: '14:00' },
@@ -2902,22 +2975,24 @@ export default function App() {
                           />
                         </div>
 
-                        <div className="lg:col-span-2">
-                          <button 
-                            onClick={() => checkAdmin(() => {
-                              if (!newGeneralEx.description.trim() || !newGeneralEx.date) return alert("Complete los campos");
-                              const id = Math.random().toString(36).substr(2, 9);
-                              setGeneralExceptions([{id, ...newGeneralEx}, ...generalExceptions]);
-                              setNewGeneralEx({ description: '', date: format(new Date(), 'yyyy-MM-dd'), type: 'ATRASO' });
-                            })}
-                            className={cn(
-                              "w-full h-11 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95",
-                              newGeneralEx.description.trim() ? "bg-blue-600 hover:bg-blue-700 shadow-blue-100" : "bg-slate-400 cursor-not-allowed"
-                            )}
-                          >
-                            <Plus className="w-5 h-5" /> REGISTRAR
-                          </button>
-                        </div>
+                        {isAdmin && (
+                          <div className="lg:col-span-2">
+                            <button 
+                              onClick={() => checkAdmin(() => {
+                                if (!newGeneralEx.description.trim() || !newGeneralEx.date) return alert("Complete los campos");
+                                const id = Math.random().toString(36).substr(2, 9);
+                                setGeneralExceptions([{id, ...newGeneralEx}, ...generalExceptions]);
+                                setNewGeneralEx({ description: '', date: safeFormat(new Date(), 'yyyy-MM-dd'), type: 'ATRASO' });
+                              })}
+                              className={cn(
+                                "w-full h-11 text-white rounded-xl text-xs font-black transition-all flex items-center justify-center gap-2 shadow-lg active:scale-95",
+                                newGeneralEx.description.trim() ? "bg-blue-600 hover:bg-blue-700 shadow-blue-100" : "bg-slate-400 cursor-not-allowed"
+                              )}
+                            >
+                              <Plus className="w-5 h-5" /> REGISTRAR
+                            </button>
+                          </div>
+                        )}
                       </div>
                     </div>
 
@@ -2939,7 +3014,7 @@ export default function App() {
                             generalExceptions.map(ex => (
                               <tr key={ex.id} className="text-xs hover:bg-slate-50/50 transition-colors">
                                 <td className="px-6 py-3 text-center tabular-nums text-slate-500">
-                                  {format(parse(ex.date, 'yyyy-MM-dd', new Date()), 'dd/MM/yyyy')}
+                                  {safeFormat(safeParseDate(ex.date), 'dd/MM/yyyy')}
                                 </td>
                                 <td className="px-6 py-3 text-center">
                                   <span className={cn(
@@ -2964,24 +3039,26 @@ export default function App() {
                                   <span className="px-2.5 py-1 bg-green-50 text-green-700 text-[10px] font-black rounded-lg border border-green-200">ACTIVO</span>
                                 </td>
                                 <td className="px-6 py-3 text-right">
-                                   <button 
-                                    onClick={() => checkAdmin(() => {
-                                      setConfirmModal({
-                                        isOpen: true,
-                                        title: '¿Eliminar Excepción?',
-                                        message: '¿Estás seguro de que deseas eliminar esta excepción general?',
-                                        confirmLabel: 'Eliminar',
-                                        isDangerous: true,
-                                        onConfirm: () => {
-                                          setGeneralExceptions(generalExceptions.filter(item => item.id !== ex.id));
-                                          setConfirmModal(null);
-                                        }
-                                      });
-                                    })}
-                                    className="text-red-500 hover:bg-red-50 transition-colors p-2 rounded-lg"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
+                                   {isAdmin && (
+                                     <button 
+                                      onClick={() => checkAdmin(() => {
+                                        setConfirmModal({
+                                          isOpen: true,
+                                          title: '¿Eliminar Excepción?',
+                                          message: '¿Estás seguro de que deseas eliminar esta excepción general?',
+                                          confirmLabel: 'Eliminar',
+                                          isDangerous: true,
+                                          onConfirm: () => {
+                                            setGeneralExceptions(generalExceptions.filter(item => item.id !== ex.id));
+                                            setConfirmModal(null);
+                                          }
+                                        });
+                                      })}
+                                      className="text-red-500 hover:bg-red-50 transition-colors p-2 rounded-lg"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                   )}
                                 </td>
                               </tr>
                             ))
@@ -2994,8 +3071,9 @@ export default function App() {
               ) : (
                 <div className="space-y-6 animate-in fade-in slide-in-from-bottom-2 duration-300">
                   {/* Registro Incidente Particular */}
-                  <div className="bg-white rounded-3xl shadow-xl shadow-slate-100 border border-slate-200 overflow-hidden">
-                    <div className="p-6 border-b border-slate-100 bg-slate-50/30 flex items-center gap-3">
+                  {isAdmin && (
+                    <div className="bg-white rounded-3xl shadow-xl shadow-slate-100 border border-slate-200 overflow-hidden mb-6">
+                      <div className="p-6 border-b border-slate-100 bg-slate-50/30 flex items-center gap-3">
                       <div className="w-10 h-10 bg-amber-500 text-white rounded-2xl flex items-center justify-center shadow-lg shadow-amber-100">
                         <Users className="w-5 h-5" />
                       </div>
@@ -3104,7 +3182,7 @@ export default function App() {
                               setParticularIncidents([{id, ...newParticularIncident, employeeName: cleanedName}, ...particularIncidents]);
                               setNewParticularIncident({
                                 employeeName: '',
-                                date: format(new Date(), 'yyyy-MM-dd'),
+                                date: safeFormat(new Date(), 'yyyy-MM-dd'),
                                 type: 'ATRASO',
                                 description: '',
                                 status: 'ACTIVO'
@@ -3121,8 +3199,11 @@ export default function App() {
                         </div>
                       </div>
                     </div>
+                  </div>
+                )}
 
-                    <div className="overflow-x-auto border-t border-slate-100">
+                  <div className="bg-white rounded-3xl shadow-xl shadow-slate-100 border border-slate-200 overflow-hidden">
+                    <div className="overflow-x-auto">
                       <table className="w-full text-left border-collapse">
                         <thead>
                           <tr className="bg-slate-50/50 text-xs font-black text-slate-400 uppercase tracking-widest border-b border-slate-100">
@@ -3142,7 +3223,7 @@ export default function App() {
                               <tr key={pi.id} className="text-xs hover:bg-slate-50/50 transition-colors">
                                 <td className="px-6 py-3 text-slate-800">{pi.employeeName}</td>
                                 <td className="px-6 py-3 text-center tabular-nums text-slate-500">
-                                  {format(parse(pi.date, 'yyyy-MM-dd', new Date()), 'dd/MM/yyyy')}
+                                  {safeFormat(safeParseDate(pi.date), 'dd/MM/yyyy')}
                                 </td>
                                 <td className="px-6 py-3 text-center">
                                   <span className={cn(
@@ -3166,26 +3247,28 @@ export default function App() {
                                 <td className="px-6 py-3 text-center">
                                   <span className="px-2.5 py-1 bg-green-50 text-green-700 text-[10px] font-black rounded-lg border border-green-200">ACTIVO</span>
                                 </td>
-                                <td className="px-6 py-3 text-right">
-                                   <button 
-                                    onClick={() => checkAdmin(() => {
-                                      setConfirmModal({
-                                        isOpen: true,
-                                        title: '¿Eliminar Incidente?',
-                                        message: '¿Estás seguro de que deseas eliminar este incidente? No podrás deshacer esta acción.',
-                                        confirmLabel: 'Eliminar',
-                                        isDangerous: true,
-                                        onConfirm: () => {
-                                          setParticularIncidents(particularIncidents.filter(item => item.id !== pi.id));
-                                          setConfirmModal(null);
-                                        }
-                                      });
-                                    })}
-                                    className="text-red-500 hover:bg-red-50 transition-colors p-2 rounded-lg"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                </td>
+                                 <td className="px-6 py-3 text-right">
+                                   {isAdmin && (
+                                     <button 
+                                      onClick={() => checkAdmin(() => {
+                                        setConfirmModal({
+                                          isOpen: true,
+                                          title: '¿Eliminar Incidente?',
+                                          message: '¿Estás seguro de que deseas eliminar este incidente? No podrás deshacer esta acción.',
+                                          confirmLabel: 'Eliminar',
+                                          isDangerous: true,
+                                          onConfirm: () => {
+                                            setParticularIncidents(particularIncidents.filter(item => item.id !== pi.id));
+                                            setConfirmModal(null);
+                                          }
+                                        });
+                                      })}
+                                      className="text-red-500 hover:bg-red-50 transition-colors p-2 rounded-lg"
+                                    >
+                                      <Trash2 className="w-4 h-4" />
+                                    </button>
+                                   )}
+                                 </td>
                               </tr>
                             ))
                           )}
@@ -3285,8 +3368,8 @@ export default function App() {
                           setExceptions([{id, ...newEx, employeeName: cleanedName}, ...exceptions]);
                           setNewEx({
                             employeeName: '',
-                            startDate: format(new Date(), 'dd/MM/yyyy'),
-                            endDate: format(new Date(), 'dd/MM/yyyy'),
+                            startDate: safeFormat(new Date(), 'dd/MM/yyyy'),
+                            endDate: safeFormat(new Date(), 'dd/MM/yyyy'),
                             deferredEntryTime: '07:30',
                             deferredExitTime: '15:30'
                           });
@@ -3512,7 +3595,7 @@ export default function App() {
                                    {/* Column: Upload Date (New) */}
                                    <div className="w-28 text-center shrink-0">
                                       <p className="text-[10px] font-bold text-slate-400">
-                                        {format(parseISO(item.uploadDate), 'dd/MM/yy HH:mm')}
+                                        {safeFormat(parseISO(item.uploadDate), 'dd/MM/yy HH:mm')}
                                       </p>
                                    </div>
 
@@ -3576,7 +3659,7 @@ export default function App() {
                                                 const datesToRemove = [...item.newDates, ...item.overwrittenDates];
                                                 setData(prev => prev.filter(r => {
                                                   const rDate = r.date instanceof Date ? r.date : new Date(r.date);
-                                                  return !datesToRemove.includes(format(rDate, 'yyyy-MM-dd'));
+                                                  return !datesToRemove.includes(safeFormat(rDate, 'yyyy-MM-dd'));
                                                 }));
                                                 setProcessedDates(prev => prev.filter(d => !datesToRemove.includes(d)));
                                                 setUploadHistory(prev => prev.filter(h => h.id !== item.id));
@@ -3613,7 +3696,7 @@ export default function App() {
                                   config: { schedule, satSchedule, appOptions, tolerances, theme }
                                 }, null, 2);
                                 const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-                                const exportFileDefaultName = 'respaldo_asistencias_' + format(new Date(), 'yyyy-MM-dd') + '.json';
+                                const exportFileDefaultName = 'respaldo_asistencias_' + safeFormat(new Date(), 'yyyy-MM-dd') + '.json';
                                 const linkElement = document.createElement('a');
                                 linkElement.setAttribute('href', dataUri);
                                 linkElement.setAttribute('download', exportFileDefaultName);
@@ -3623,44 +3706,46 @@ export default function App() {
                             >
                                <Download className="w-4 h-4" /> Exportar JSON
                             </button>
-                            <button 
-                              onClick={() => checkAdmin(() => {
-                                 setConfirmModal({
-                                   isOpen: true,
-                                   title: '🚨 ¿LIMPIAR TODO?',
-                                   message: 'Esta acción borrará permanentemente toda la base de datos de asistencia. No podrás deshacerlo.',
-                                   confirmLabel: 'SI, LIMPIAR TODO',
-                                   isDangerous: true,
-                                   onConfirm: () => {
-                                      setData([]);
-                                      setProcessedDates([]);
-                                      setExceptions(PRELOADED_HORARIOS);
-                                      setHybridSchedules([]);
-                                      setGeneralExceptions([]);
-                                      setParticularIncidents([]);
-                                      setUploadHistory([]);
-                                      localStorage.clear();
-                                      syncWithServer('save', {
-                                        data: [],
-                                        exceptions: PRELOADED_HORARIOS,
-                                        hybridSchedules: [],
-                                        generalExceptions: [],
-                                        particularIncidents: [],
-                                        processedDates: [],
-                                        uploadHistory: [],
-                                        config: { schedule, satSchedule, appOptions, tolerances, theme }
-                                      }).then(() => {
-                                         alert('Sistema reiniciado.');
-                                         window.location.reload();
-                                      });
-                                      setConfirmModal(null);
-                                   }
-                                 });
-                              })}
-                              className="px-6 py-3 bg-red-50 text-red-600 border border-red-100 rounded-xl text-[10px] font-bold uppercase tracking-tight hover:bg-red-100 transition-all flex items-center gap-2"
-                            >
-                               <Trash2 className="w-4 h-4" /> Limpiar Todo
-                            </button>
+                            {isAdmin && (
+                              <button 
+                                onClick={() => checkAdmin(() => {
+                                   setConfirmModal({
+                                     isOpen: true,
+                                     title: '🚨 ¿LIMPIAR TODO?',
+                                     message: 'Esta acción borrará permanentemente toda la base de datos de asistencia. No podrás deshacerlo.',
+                                     confirmLabel: 'SI, LIMPIAR TODO',
+                                     isDangerous: true,
+                                     onConfirm: () => {
+                                        setData([]);
+                                        setProcessedDates([]);
+                                        setExceptions(PRELOADED_HORARIOS);
+                                        setHybridSchedules([]);
+                                        setGeneralExceptions([]);
+                                        setParticularIncidents([]);
+                                        setUploadHistory([]);
+                                        localStorage.clear();
+                                        syncWithServer('save', {
+                                          data: [],
+                                          exceptions: PRELOADED_HORARIOS,
+                                          hybridSchedules: [],
+                                          generalExceptions: [],
+                                          particularIncidents: [],
+                                          processedDates: [],
+                                          uploadHistory: [],
+                                          config: { schedule, satSchedule, appOptions, tolerances, theme }
+                                        }).then(() => {
+                                           alert('Sistema reiniciado.');
+                                           window.location.reload();
+                                        });
+                                        setConfirmModal(null);
+                                     }
+                                   });
+                                })}
+                                className="px-6 py-3 bg-red-50 text-red-600 border border-red-100 rounded-xl text-[10px] font-bold uppercase tracking-tight hover:bg-red-100 transition-all flex items-center gap-2"
+                              >
+                                 <Trash2 className="w-4 h-4" /> Limpiar Todo
+                              </button>
+                            )}
                          </div>
                       </div>
                    </div>
@@ -4179,7 +4264,7 @@ export default function App() {
               <div className="grid grid-cols-2 gap-4 mb-8">
                 <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Fecha de Carga</p>
-                  <p className="text-xs font-bold text-slate-700">{format(parseISO(selectedUpload.uploadDate), 'dd/MM/yyyy HH:mm')}</p>
+                  <p className="text-xs font-bold text-slate-700">{safeFormat(parseISO(selectedUpload.uploadDate), 'dd/MM/yyyy HH:mm')}</p>
                 </div>
                 <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
                   <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Total Registros</p>
@@ -4194,9 +4279,9 @@ export default function App() {
                     Rango de Fechas
                   </h3>
                   <div className="flex items-center gap-2 p-3 bg-indigo-50/30 rounded-xl border border-indigo-100/50">
-                    <span className="text-xs font-bold text-indigo-700">{format(parseISO(selectedUpload.dateRange.start), 'dd/MM/yyyy')}</span>
+                    <span className="text-xs font-bold text-indigo-700">{safeFormat(parseISO(selectedUpload.dateRange.start), 'dd/MM/yyyy')}</span>
                     <ArrowRight className="w-3 h-3 text-indigo-300" />
-                    <span className="text-xs font-bold text-indigo-700">{format(parseISO(selectedUpload.dateRange.end), 'dd/MM/yyyy')}</span>
+                    <span className="text-xs font-bold text-indigo-700">{safeFormat(parseISO(selectedUpload.dateRange.end), 'dd/MM/yyyy')}</span>
                   </div>
                 </div>
 
@@ -4213,7 +4298,7 @@ export default function App() {
                       <div className="flex flex-wrap gap-1.5">
                         {selectedUpload.overwrittenDates.map(date => (
                           <span key={date} className="px-2 py-0.5 bg-white text-[9px] font-black text-amber-600 border border-amber-200 rounded-md">
-                            {format(parseISO(date), 'dd/MM')}
+                            {safeFormat(parseISO(date), 'dd/MM')}
                           </span>
                         ))}
                       </div>
@@ -4232,7 +4317,7 @@ export default function App() {
                     ) : (
                       selectedUpload.newDates.map(date => (
                         <span key={date} className="px-2 py-0.5 bg-green-50 text-[9px] font-black text-green-600 border border-green-100 rounded-md">
-                          {format(parseISO(date), 'dd/MM')}
+                          {safeFormat(parseISO(date), 'dd/MM')}
                         </span>
                       ))
                     )}
@@ -4465,7 +4550,7 @@ export default function App() {
                     <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100">
                       <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Fecha</p>
                       <p className="font-bold text-slate-700">
-                        {selectedJustification.date ? format(parse(selectedJustification.date, 'yyyy-MM-dd', new Date()), 'dd/MM/yyyy') : '-'}
+                        {selectedJustification.date ? safeFormat(safeParseDate(selectedJustification.date), 'dd/MM/yyyy') : '-'}
                       </p>
                     </div>
                   </div>
