@@ -906,6 +906,9 @@ export default function App() {
   };
 
   const [isProcessing, setIsProcessing] = useState(false);
+  const [showTutorial, setShowTutorial] = useState(() => {
+    return !localStorage.getItem('asistify_tutorial_v1');
+  });
   const [showAllDays, setShowAllDays] = useState(true);
   const [isEditModalOpen, setIsEditModalOpen] = useState(false);
   const [isDeleteModalOpen, setIsDeleteModalOpen] = useState(false);
@@ -1982,6 +1985,14 @@ export default function App() {
                 <span className="text-xs font-bold text-slate-700 truncate capitalize">{user?.displayName?.toLowerCase() || 'Usuario'}</span>
                 <span className="text-[9px] text-slate-400 truncate">{user?.email}</span>
               </div>
+              <button 
+                onClick={() => setShowTutorial(true)}
+                className="p-1 px-2 hover:bg-slate-100 rounded-md text-slate-500 hover:text-blue-600 transition-colors flex items-center gap-1 text-[10px] font-bold"
+                title="Guía de uso"
+              >
+                <Info className="w-3 h-3" />
+                Guía
+              </button>
             </div>
             <button 
               onClick={() => signOut(auth)}
@@ -4704,6 +4715,133 @@ export default function App() {
                 >
                   {confirmModal.confirmLabel || 'Confirmar'}
                 </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Tutorial Modal */}
+      <AnimatePresence>
+        {showTutorial && (
+          <div className="fixed inset-0 z-[200] flex items-center justify-center p-4">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => {
+                setShowTutorial(false);
+                localStorage.setItem('asistify_tutorial_v1', 'true');
+              }}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-md"
+            />
+            <motion.div 
+              initial={{ scale: 0.9, opacity: 0, y: 30 }}
+              animate={{ scale: 1, opacity: 1, y: 0 }}
+              exit={{ scale: 0.9, opacity: 0, y: 30 }}
+              className="relative bg-white rounded-[2rem] shadow-2xl w-full max-w-2xl overflow-hidden border border-slate-200"
+            >
+              <div className="flex flex-col h-full max-h-[90vh]">
+                <div className="p-8 pb-4">
+                  <div className="flex items-center gap-4 mb-4">
+                    <div className="p-3 bg-gradient-to-tr from-blue-600 to-indigo-600 text-white rounded-2xl shadow-lg ring-4 ring-blue-50">
+                      <LayoutDashboard className="w-8 h-8" />
+                    </div>
+                    <div>
+                      <h2 className="text-3xl font-black text-slate-900 tracking-tight">Bienvenido a Asistify</h2>
+                      <p className="text-slate-500 font-medium">Guía rápida para comenzar a analizar</p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="flex-1 overflow-y-auto px-8 py-4 custom-scrollbar">
+                  <div className="space-y-8">
+                    {/* Paso 1 */}
+                    <div className="flex gap-6 group">
+                      <div className="flex-shrink-0 w-12 h-12 rounded-2xl bg-amber-50 text-amber-600 flex items-center justify-center font-black text-xl border-2 border-amber-100 group-hover:bg-amber-100 transition-colors">
+                        1
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="font-black text-slate-800 text-lg flex items-center gap-2">
+                          Configura la Base <Settings className="w-4 h-4 text-slate-400" />
+                        </h3>
+                        <p className="text-slate-600 text-sm leading-relaxed">
+                          Ve a <strong className="text-slate-900">Configuración</strong> para establecer los horarios base del departamento y los márgenes de tolerancia (semáforos).
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Paso 2 */}
+                    <div className="flex gap-6 group">
+                      <div className="flex-shrink-0 w-12 h-12 rounded-2xl bg-blue-50 text-blue-600 flex items-center justify-center font-black text-xl border-2 border-blue-100 group-hover:bg-blue-100 transition-colors">
+                        2
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="font-black text-slate-800 text-lg flex items-center gap-2">
+                          Carga los Datos <FileUp className="w-4 h-4 text-slate-400" />
+                        </h3>
+                        <p className="text-slate-600 text-sm leading-relaxed">
+                          En la pestaña <strong className="text-slate-900">Cargar Datos</strong>, sube tu archivo Excel o pega el texto directamente. El sistema detectará automáticamente nombres, fechas y horas.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Paso 3 */}
+                    <div className="flex gap-6 group">
+                      <div className="flex-shrink-0 w-12 h-12 rounded-2xl bg-indigo-50 text-indigo-600 flex items-center justify-center font-black text-xl border-2 border-indigo-100 group-hover:bg-indigo-100 transition-colors">
+                        3
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="font-black text-slate-800 text-lg flex items-center gap-2">
+                          Casos Especiales <Building2 className="w-4 h-4 text-slate-400" />
+                        </h3>
+                        <p className="text-slate-600 text-sm leading-relaxed">
+                          Utiliza las pestañas de <strong className="text-slate-900">Horarios Diferidos</strong> y <strong className="text-slate-900">Teletrabajo/Híbridos</strong> para que el sistema ajuste el análisis a la realidad de cada colaborador.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Paso 4 */}
+                    <div className="flex gap-6 group">
+                      <div className="flex-shrink-0 w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-black text-xl border-2 border-emerald-100 group-hover:bg-emerald-100 transition-colors">
+                        4
+                      </div>
+                      <div className="space-y-1">
+                        <h3 className="font-black text-slate-800 text-lg flex items-center gap-2">
+                          Filtra y Exporta <Download className="w-4 h-4 text-slate-400" />
+                        </h3>
+                        <p className="text-slate-600 text-sm leading-relaxed">
+                          Desde el <strong className="text-slate-900">Dashboard</strong> visualiza las alertas rojas y naranjas. Puedes filtrar por nombre o rango de fecha y exportar todo a PDF profesional o Excel.
+                        </p>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="mt-10 p-6 bg-slate-900 rounded-3xl text-white relative overflow-hidden group">
+                    <div className="absolute top-0 right-0 w-32 h-32 bg-blue-500/20 rounded-full -mr-16 -mt-16 blur-2xl group-hover:bg-blue-500/30 transition-all duration-700" />
+                    <div className="relative z-10 flex items-center gap-4">
+                      <div className="p-3 bg-white/10 rounded-2xl backdrop-blur-sm border border-white/10">
+                        <CheckCircle className="w-6 h-6 text-emerald-400" />
+                      </div>
+                      <div>
+                        <h4 className="font-black text-lg">Sincronización en la Nube</h4>
+                        <p className="text-slate-400 text-sm">Toda tu configuración y justificaciones se guardan automáticamente en Firebase.</p>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="p-8 pt-4">
+                  <button 
+                    onClick={() => {
+                      setShowTutorial(false);
+                      localStorage.setItem('asistify_tutorial_v1', 'true');
+                    }}
+                    className="w-full py-5 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl font-black text-lg shadow-xl shadow-blue-500/25 hover:shadow-blue-500/40 hover:scale-[1.02] active:scale-[0.98] transition-all"
+                  >
+                    ¡Entendido, comencemos!
+                  </button>
+                </div>
               </div>
             </motion.div>
           </div>
